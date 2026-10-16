@@ -1,0 +1,36 @@
+# REUSABLE IMPLEMENTATION PROMPT — EXISTING FLUTTER MOBILE APP
+
+Implement the requested phase in my existing Hindi Novel & Audiobook Platform.
+
+## Before coding
+- Inspect the existing repository and relevant backend code.
+- Identify reusable services, models, routes, state-management conventions, and widgets.
+- Verify the API contracts before integration.
+- Identify missing capabilities instead of guessing.
+
+## While coding
+- Preserve existing functionality.
+- Reuse the current architecture and shared API client.
+- Avoid unnecessary refactoring and dependency upgrades.
+- Integrate the feature into existing navigation and state management.
+- Support appropriate loading, success, empty, error, offline, and retry states.
+- Handle pagination and duplicate requests where relevant.
+- Keep sensitive data secure.
+- Support Hindi and Devanagari text rendering.
+- Do not hardcode production URLs or fabricate backend data.
+- Keep the implementation maintainable and suitable for future Android and iOS support.
+
+## Testing
+- Add unit tests for models, services, repositories, and state management as appropriate.
+- Add widget tests for primary user journeys and error states.
+- Add integration tests where feasible.
+- Test regressions in previously implemented features.
+- Run formatting, flutter analyze, flutter test, and an Android release build if the environment supports them.
+
+## Final report
+List implemented features, changed files, verified endpoints, test outcomes, build outcomes, known limitations, and manual verification steps. State clearly which tests used mocks and which reached the real backend.
+
+Never claim success for commands or functionality that was not verified.
+
+## Phase-specific instructions
+Follow the separate implementation specification for the current phase. If the backend does not support a requested feature, document the gap rather than pretending it works.
