@@ -1,0 +1,109 @@
+PS D:\new_app\hindi-xianxia-platform\mobile> flutter test
+00:13 +6 -1: D:/new_app/hindi-xianxia-platform/mobile/test/unit/audio_player_notifier_test.dart: AudioPlayerNotifier Tests Initial AudioPlayerState starts with default values [E]
+  'package:flutter/src/services/platform_channel.dart': Failed assertion: line 589 pos 7: '_binaryMessenger != null || BindingBase.debugBindingType() != null': Cannot set the method call handler before the binary messenger has been initialized. This happens when you call setMethodCallHandler() before the WidgetsFlutterBinding has been initialized. You can fix this by either calling WidgetsFlutterBinding.ensureInitialized() before this or by passing a custom BinaryMessenger instance to MethodChannel().
+  dart:core                                                                                _AssertionError._throwNew
+  package:flutter/src/services/platform_channel.dart 589:7                                 MethodChannel.setMethodCallHandler
+  package:audio_session/src/core.dart 150:14                                               new AudioSession._
+  package:audio_session/src/core.dart 28:32                                                AudioSession.instance
+  package:just_audio/just_audio.dart 303:20                                                new AudioPlayer
+  package:xianxia_mobile/features/audiobook/presentation/audio_player_notifier.dart 74:29  new AudioPlayerNotifier
+  test\unit\audio_player_notifier_test.dart 42:24                                          main.<fn>.<fn>
+  ===== asynchronous gap ===========================
+  dart:async                                                                               Future._asyncCompleteError
+  package:just_audio/just_audio.dart 303:20                                                new AudioPlayer
+  package:xianxia_mobile/features/audiobook/presentation/audio_player_notifier.dart 74:29  new AudioPlayerNotifier
+  test\unit\audio_player_notifier_test.dart 42:24                                          main.<fn>.<fn>
+  
+
+To run this test again: C:\src\flutter\bin\cache\dart-sdk\bin\dart.exe test D:/new_app/hindi-xianxia-platform/mobile/test/unit/audio_player_notifier_test.dart -p vm --plain-name "AudioPlayerNotifier Tests Initial AudioPlayerState starts with default values"
+00:13 +6 -2: D:/new_app/hindi-xianxia-platform/mobile/test/unit/audio_player_notifier_test.dart: AudioPlayerNotifier Tests Speed change updates state accurately [E]    
+  'package:flutter/src/services/platform_channel.dart': Failed assertion: line 589 pos 7: '_binaryMessenger != null || BindingBase.debugBindingType() != null': Cannot set the method call handler before the binary messenger has been initialized. This happens when you call setMethodCallHandler() before the WidgetsFlutterBinding has been initialized. You can fix this by either calling WidgetsFlutterBinding.ensureInitialized() before this or by passing a custom BinaryMessenger instance to MethodChannel().
+  dart:core                                                                                _AssertionError._throwNew
+  package:flutter/src/services/platform_channel.dart 589:7                                 MethodChannel.setMethodCallHandler
+  package:audio_session/src/core.dart 150:14                                               new AudioSession._
+  package:audio_session/src/core.dart 28:32                                                AudioSession.instance
+  package:just_audio/just_audio.dart 303:20                                                new AudioPlayer
+  package:xianxia_mobile/features/audiobook/presentation/audio_player_notifier.dart 74:29  new AudioPlayerNotifier
+  test\unit\audio_player_notifier_test.dart 50:24                                          main.<fn>.<fn>
+  ===== asynchronous gap ===========================
+  dart:async                                                                               Future._asyncCompleteError
+  package:just_audio/just_audio.dart 303:20                                                new AudioPlayer
+  package:xianxia_mobile/features/audiobook/presentation/audio_player_notifier.dart 74:29  new AudioPlayerNotifier
+  test\unit\audio_player_notifier_test.dart 50:24                                          main.<fn>.<fn>
+  
+
+To run this test again: C:\src\flutter\bin\cache\dart-sdk\bin\dart.exe test D:/new_app/hindi-xianxia-platform/mobile/test/unit/audio_player_notifier_test.dart -p vm --plain-name "AudioPlayerNotifier Tests Speed change updates state accurately"
+00:14 +6 -3: D:/new_app/hindi-xianxia-platform/mobile/test/unit/audio_player_notifier_test.dart: AudioPlayerNotifier Tests Car mode toggles properly [E]                
+  'package:flutter/src/services/platform_channel.dart': Failed assertion: line 589 pos 7: '_binaryMessenger != null || BindingBase.debugBindingType() != null': Cannot set the method call handler before the binary messenger has been initialized. This happens when you call setMethodCallHandler() before the WidgetsFlutterBinding has been initialized. You can fix this by either calling WidgetsFlutterBinding.ensureInitialized() before this or by passing a custom BinaryMessenger instance to MethodChannel().
+  dart:core                                                                                _AssertionError._throwNew
+  package:flutter/src/services/platform_channel.dart 589:7                                 MethodChannel.setMethodCallHandler
+  package:audio_session/src/core.dart 150:14                                               new AudioSession._
+  package:audio_session/src/core.dart 28:32                                                AudioSession.instance
+  package:just_audio/just_audio.dart 303:20                                                new AudioPlayer
+  package:xianxia_mobile/features/audiobook/presentation/audio_player_notifier.dart 74:29  new AudioPlayerNotifier
+  test\unit\audio_player_notifier_test.dart 57:24                                          main.<fn>.<fn>
+  ===== asynchronous gap ===========================
+  dart:async                                                                               Future._asyncCompleteError
+  package:just_audio/just_audio.dart 303:20                                                new AudioPlayer
+  package:xianxia_mobile/features/audiobook/presentation/audio_player_notifier.dart 74:29  new AudioPlayerNotifier
+  test\unit\audio_player_notifier_test.dart 57:24                                          main.<fn>.<fn>
+  
+
+To run this test again: C:\src\flutter\bin\cache\dart-sdk\bin\dart.exe test D:/new_app/hindi-xianxia-platform/mobile/test/unit/audio_player_notifier_test.dart -p vm --plain-name "AudioPlayerNotifier Tests Car mode toggles properly"
+00:27 +22 -3: D:/new_app/hindi-xianxia-platform/mobile/test/widget/home_discovery_screen_test.dart: Home screen displays Books/Audiobooks tabs, Hero banner, and Continue Reading
+══╡ EXCEPTION CAUGHT BY FLUTTER TEST FRAMEWORK ╞════════════════════════════════════════════════════
+The following TestFailure was thrown running a test:
+Expected: exactly one matching candidate
+  Actual: _TextWidgetFinder:<Found 0 widgets with text "Read Chapter 1 (FREE)": []>
+   Which: means none were found but one was expected
+
+When the exception was thrown, this was the stack:
+#4      main.<anonymous closure> (file:///D:/new_app/hindi-xianxia-platform/mobile/test/widget/home_discovery_screen_test.dart:92:5)
+<asynchronous suspension>
+#5      testWidgets.<anonymous closure>.<anonymous closure> (package:flutter_test/src/widget_tester.dart:192:15)
+<asynchronous suspension>
+#6      TestWidgetsFlutterBinding._runTestBody (package:flutter_test/src/binding.dart:1953:5)
+<asynchronous suspension>
+<asynchronous suspension>
+(elided one frame from package:stack_trace)
+
+This was caught by the test expectation on the following line:
+  file:///D:/new_app/hindi-xianxia-platform/mobile/test/widget/home_discovery_screen_test.dart line 92
+The test description was:
+  Home screen displays Books/Audiobooks tabs, Hero banner, and Continue Reading
+════════════════════════════════════════════════════════════════════════════════════════════════════
+00:28 +22 -4: D:/new_app/hindi-xianxia-platform/mobile/test/widget/home_discovery_screen_test.dart: Home screen displays Books/Audiobooks tabs, Hero banner, and Continue Reading [E]
+  Test failed. See exception logs above.
+  The test description was: Home screen displays Books/Audiobooks tabs, Hero banner, and Continue Reading
+  
+
+To run this test again: C:\src\flutter\bin\cache\dart-sdk\bin\dart.exe test D:/new_app/hindi-xianxia-platform/mobile/test/widget/home_discovery_screen_test.dart -p vm --plain-name "Home screen displays Books/Audiobooks tabs, Hero banner, and Continue Reading"
+00:34 +23 -4: D:/new_app/hindi-xianxia-platform/mobile/test/widget/novel_detail_screen_test.dart: NovelDetailScreen renders metadata, category filter tabs, and chapters list
+══╡ EXCEPTION CAUGHT BY FLUTTER TEST FRAMEWORK ╞════════════════════════════════════════════════════
+The following TestFailure was thrown running a test:
+Expected: exactly one matching candidate
+  Actual: _TextWidgetFinder:<Found 0 widgets with text "Read Chapter 1 (FREE)": []>
+   Which: means none were found but one was expected
+
+When the exception was thrown, this was the stack:
+#4      main.<anonymous closure> (file:///D:/new_app/hindi-xianxia-platform/mobile/test/widget/novel_detail_screen_test.dart:89:5)
+<asynchronous suspension>
+#5      testWidgets.<anonymous closure>.<anonymous closure> (package:flutter_test/src/widget_tester.dart:192:15)
+<asynchronous suspension>
+#6      TestWidgetsFlutterBinding._runTestBody (package:flutter_test/src/binding.dart:1953:5)
+<asynchronous suspension>
+<asynchronous suspension>
+(elided one frame from package:stack_trace)
+
+This was caught by the test expectation on the following line:
+  file:///D:/new_app/hindi-xianxia-platform/mobile/test/widget/novel_detail_screen_test.dart line 89
+The test description was:
+  NovelDetailScreen renders metadata, category filter tabs, and chapters list
+════════════════════════════════════════════════════════════════════════════════════════════════════
+00:34 +23 -5: D:/new_app/hindi-xianxia-platform/mobile/test/widget/novel_detail_screen_test.dart: NovelDetailScreen renders metadata, category filter tabs, and chapters list [E]
+  Test failed. See exception logs above.
+  The test description was: NovelDetailScreen renders metadata, category filter tabs, and chapters list
+  
+
+To run this test again: C:\src\flutter\bin\cache\dart-sdk\bin\dart.exe test D:/new_app/hindi-xianxia-platform/mobile/test/widget/novel_detail_screen_test.dart -p vm --plain-name "NovelDetailScreen renders metadata, category filter tabs, and chapters list"
+00:39 +25 -5: Some tests failed.                                                                                                                                        
