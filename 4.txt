@@ -1,0 +1,1643 @@
+// ignore_for_file: duplicate_ignore, deprecated_member_use
+
+import 'package:flutter/material.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:window_manager/window_manager.dart';
+
+import '../models/profile.dart';
+import '../models/browser_tab.dart';
+import '../services/profile_service.dart';
+import '../services/environment_service.dart';
+import '../services/ad_blocker_service.dart';
+import '../services/favicon_service.dart';
+import '../services/zoom_service.dart';
+import '../services/omnibox_service.dart';
+import '../widgets/find_bar.dart';
+import 'package:flutter/services.dart';
+import '../services/user_agent_service.dart';
+import '../services/app_profile_service.dart';
+import '../models/user_script.dart';
+import '../services/script_injector_service.dart';
+import '../models/api_log.dart';
+import '../services/api_sniffer_service.dart';
+import '../widgets/api_sniffer_panel.dart';
+import '../services/element_zapper_service.dart';
+import '../models/zapped_element.dart';
+import '../widgets/zapper_panel.dart';
+import 'dart:collection';
+import '../services/media_spoofing_service.dart';
+import '../services/canvas_spoofing_service.dart';
+import '../models/api_rewrite_rule.dart';
+import '../services/api_rewriter_service.dart';
+import '../services/location_spoofing_service.dart';
+import '../services/proxy_service.dart';
+import '../services/media_superpowers_service.dart';
+import '../services/download_manager_service.dart';
+import '../services/webrtc_shield_service.dart';
+import '../services/youtube_downloader_service.dart';
+import '../widgets/proxy_manager_dialog.dart';
+
+class BrowserPane extends StatefulWidget {
+  final String paneId;
+  final String appProfile;
+  final bool isSplit;
+  final VoidCallback onToggleSplit;
+
+  const BrowserPane({
+    super.key,
+    required this.paneId,
+    required this.appProfile,
+    required this.isSplit,
+    required this.onToggleSplit,
+  });
+
+  @override
+  State<BrowserPane> createState() => _BrowserPaneState();
+}
+
+class _BrowserPaneState extends State<BrowserPane> {
+  WebViewEnvironment? _isolatedEnvironment;
+  bool _isLoadingEnvironment = true;
+  ProxyItem? _activeProxy;
+
+  // --- TAB MANAGEMENT ---
+  final List<BrowserTab> _tabs = [];
+  int _currentTabIndex = 0;
+
+  // The shared UI controller for the URL bar
+  final TextEditingController _urlController = TextEditingController();
+  List<BrowserProfile> _profiles = [];
+
+  // Helper to easily get the active tab
+  BrowserTab get activeTab => _tabs[_currentTabIndex];
+
+  @override
+  void initState() {
+    super.initState();
+    _addNewTab(); // Create the first tab
+    _loadSavedProfiles();
+    _initIsolatedEnvironment();
+  }
+
+  Future<void> _initIsolatedEnvironment() async {
+    // 2. Fetch the proxy once and save it to RAM for instant access!
+    _activeProxy = await ProxyManagerService.getActiveProxy(
+      widget.paneId,
+      widget.appProfile,
+    );
+
+    final env = await EnvironmentService.getIsolatedEnvironment(
+      widget.paneId,
+      widget.appProfile,
+    );
+    if (mounted) {
+      setState(() {
+        _isolatedEnvironment = env;
+        _isLoadingEnvironment = false;
+      });
+    }
+  }
+
+  Future<void> _loadSavedProfiles() async {
+    // Pass widget.appProfile here!
+    final profiles = await ProfileService.loadProfiles(widget.appProfile);
+    setState(() => _profiles = profiles);
+  }
+
+  // --- TAB FUNCTIONS ---
+  void _addNewTab([String url = 'https://google.com']) {
+    setState(() {
+      _tabs.add(
+        BrowserTab(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+          url: url,
+        ),
+      );
+      _currentTabIndex = _tabs.length - 1;
+      _urlController.text = url;
+    });
+  }
+
+  void _switchTab(int index) {
+    setState(() {
+      _currentTabIndex = index;
+      _urlController.text = activeTab.url;
+    });
+  }
+
+  void _closeTab(int index) {
+    setState(() {
+      if (_tabs.length == 1) {
+        // If it's the last tab, reset it to a new blank page
+        _tabs[0] = BrowserTab(
+          id: DateTime.now().millisecondsSinceEpoch.toString(),
+        );
+        _urlController.text = _tabs[0].url;
+      } else {
+        // 1. If we are closing a tab that is BEFORE our active tab,
+        // our active tab will shift to the left by 1!
+        if (index < _currentTabIndex) {
+          _currentTabIndex--;
+        }
+        // 2. If we are closing the VERY LAST tab while looking at it, shift left
+        else if (index == _currentTabIndex && index == _tabs.length - 1) {
+          _currentTabIndex--;
+        }
+
+        // 3. Now it is safe to remove the tab!
+        _tabs.removeAt(index);
+        _urlController.text = activeTab.url;
+      }
+    });
+  }
+
+  // --- URL LOADING ---
+  void _loadUrl(String input) {
+    if (input.isEmpty) return;
+    final finalUrl = OmniboxService.parseInput(input);
+    activeTab.webViewController?.loadUrl(
+      urlRequest: URLRequest(url: WebUri(finalUrl)),
+    );
+  }
+
+  void _showSaveProfileDialog() {
+    final nameController = TextEditingController(text: activeTab.title);
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Save Website Profile'),
+          content: TextField(
+            controller: nameController,
+            decoration: const InputDecoration(
+              hintText: 'Profile Name (e.g., Work Gmail)',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                if (nameController.text.isNotEmpty) {
+                  final newProfile = BrowserProfile(
+                    id: DateTime.now().millisecondsSinceEpoch.toString(),
+                    name: nameController.text,
+                    url: _urlController.text,
+                    faviconUrl: FaviconService.getFaviconUrl(
+                      _urlController.text,
+                    ),
+                  );
+                  await ProfileService.saveProfile(
+                    newProfile,
+                    widget.appProfile,
+                  );
+                  await _loadSavedProfiles();
+                }
+                // ignore: use_build_context_synchronously
+                if (mounted) Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // --- APP PROFILE MANAGER LOGIC ---
+  void _showProfileManager() async {
+    final profiles = await AppProfileService.getProfiles();
+    final nameController = TextEditingController();
+
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Browser Profiles (Current: ${widget.appProfile})'),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ...profiles.map(
+                  (p) => ListTile(
+                    leading: Icon(
+                      Icons.account_circle,
+                      color: p == widget.appProfile ? Colors.blue : Colors.grey,
+                    ),
+                    title: Text(p),
+                    trailing: p == widget.appProfile
+                        ? const Text('Active')
+                        : null,
+                    onTap: () {
+                      Navigator.pop(context);
+                      AppProfileService.launchProfileWindow(p);
+                    },
+                  ),
+                ),
+                const Divider(),
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    hintText: 'New Profile Name (e.g. Work)',
+                    icon: Icon(Icons.add),
+                  ),
+                  onSubmitted: (val) async {
+                    if (val.isNotEmpty) {
+                      await AppProfileService.addProfile(val);
+                      // ignore: use_build_context_synchronously
+                      Navigator.pop(context);
+                      AppProfileService.launchProfileWindow(val);
+                    }
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // --- JAVASCRIPT INJECTOR UI ---
+  void _showScriptEditorDialog() async {
+    final currentUrl = activeTab.url;
+    final domain = ScriptInjectorService.getDomainFromUrl(currentUrl);
+
+    if (domain.isEmpty) return;
+
+    // Load existing script for this domain if we have one
+    final scripts = await ScriptInjectorService.loadScripts(widget.appProfile);
+    final existingScript = scripts.where((s) => s.domain == domain).firstOrNull;
+
+    final codeController = TextEditingController(
+      text: existingScript?.code ?? '',
+    );
+
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Custom JS for: $domain'),
+          content: SizedBox(
+            width: 600,
+            child: TextField(
+              controller: codeController,
+              maxLines: 15,
+              style: const TextStyle(
+                fontFamily: 'Consolas',
+                fontSize: 13,
+                color: Colors.greenAccent,
+              ),
+              decoration: const InputDecoration(
+                hintText:
+                    'Write your JavaScript here...\ne.g. document.body.style.backgroundColor = "black";',
+                border: OutlineInputBorder(),
+                filled: true,
+                fillColor: Colors.black87,
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                // FIX: Changed UserScript to CustomScript
+                final newScript = CustomScript(
+                  domain: domain,
+                  code: codeController.text,
+                );
+                await ScriptInjectorService.saveScript(
+                  newScript,
+                  widget.appProfile,
+                );
+
+                // Immediately run the new script!
+                if (activeTab.webViewController != null) {
+                  activeTab.webViewController!.evaluateJavascript(
+                    source: codeController.text,
+                  );
+                }
+
+                // FIX: Changed 'mounted' to 'context.mounted' to fix the lint warning
+                if (context.mounted) Navigator.pop(context);
+              },
+              child: const Text(
+                'Save & Run',
+                style: TextStyle(color: Colors.greenAccent),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  // --- API REWRITER MANAGER UI ---
+  void _showRewriterDialog() async {
+    final urlController = TextEditingController();
+    final jsonController = TextEditingController(text: '{"success": true}');
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        // Use StatefulBuilder so we can update the list dynamically without closing the dialog
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text(
+                'API Response Rewriter (Mocking)',
+                style: TextStyle(color: Colors.purpleAccent),
+              ),
+              content: SizedBox(
+                width: 600,
+                child: FutureBuilder<List<ApiRewriteRule>>(
+                  future: ApiRewriterService.loadRules(widget.appProfile),
+                  builder: (context, snapshot) {
+                    final rules = snapshot.data ?? [];
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // List existing rules
+                        if (rules.isNotEmpty) ...[
+                          const Text(
+                            'Active Rules:',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(height: 8),
+                          ...rules.map(
+                            (r) => ListTile(
+                              title: Text(
+                                r.urlPattern,
+                                style: const TextStyle(
+                                  color: Colors.cyanAccent,
+                                  fontSize: 13,
+                                ),
+                              ),
+                              subtitle: Text(
+                                r.fakeResponse,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              trailing: IconButton(
+                                icon: const Icon(
+                                  Icons.delete,
+                                  color: Colors.redAccent,
+                                ),
+                                onPressed: () async {
+                                  await ApiRewriterService.deleteRule(
+                                    r.id,
+                                    widget.appProfile,
+                                  );
+                                  // Sync the deletion to the live browser instantly
+                                  await ApiRewriterService.syncRulesToBrowser(
+                                    activeTab.webViewController,
+                                    widget.appProfile,
+                                  );
+                                  setDialogState(() {}); // Refresh list
+                                },
+                              ),
+                            ),
+                          ),
+                          const Divider(),
+                        ],
+
+                        // new rule form
+                        TextField(
+                          controller: urlController,
+                          decoration: const InputDecoration(
+                            hintText: 'URL matches (e.g., /api/user)',
+                            labelText: 'Target URL snippet',
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: jsonController,
+                          maxLines: 4,
+                          style: const TextStyle(
+                            fontFamily: 'Consolas',
+                            color: Colors.purpleAccent,
+                          ),
+                          decoration: const InputDecoration(
+                            hintText: 'Fake JSON Response',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.add),
+                          label: const Text('Add Rule'),
+                          onPressed: () async {
+                            if (urlController.text.isNotEmpty &&
+                                jsonController.text.isNotEmpty) {
+                              final rule = ApiRewriteRule(
+                                id: DateTime.now().millisecondsSinceEpoch
+                                    .toString(),
+                                urlPattern: urlController.text,
+                                fakeResponse: jsonController.text,
+                                status: 200,
+                              );
+                              await ApiRewriterService.saveRule(
+                                rule,
+                                widget.appProfile,
+                              );
+                              await ApiRewriterService.syncRulesToBrowser(
+                                activeTab.webViewController,
+                                widget.appProfile,
+                              );
+                              urlController.clear();
+                              setDialogState(() {}); // Refresh list
+                            }
+                          },
+                        ),
+                      ],
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // --- GPS SPOOFER UI ---
+  void _showLocationSpooferDialog() {
+    final latController = TextEditingController(
+      text: activeTab.spoofedLat.toString(),
+    );
+    final lngController = TextEditingController(
+      text: activeTab.spoofedLng.toString(),
+    );
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text(
+                'Spoof GPS Location',
+                style: TextStyle(color: Colors.greenAccent),
+              ),
+              content: SizedBox(
+                width: 300,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SwitchListTile(
+                      title: const Text('Enable Location Spoofing'),
+                      activeColor: Colors.greenAccent,
+                      value: activeTab.isLocationSpoofed,
+                      onChanged: (val) {
+                        setDialogState(() => activeTab.isLocationSpoofed = val);
+                        setState(() {});
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: latController,
+                      decoration: const InputDecoration(
+                        labelText: 'Latitude (e.g., 35.6586)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                      enabled: activeTab.isLocationSpoofed,
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: lngController,
+                      decoration: const InputDecoration(
+                        labelText: 'Longitude (e.g., 139.7454)',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.number,
+                      enabled: activeTab.isLocationSpoofed,
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () async {
+                    setState(() {
+                      activeTab.spoofedLat =
+                          double.tryParse(latController.text) ??
+                          activeTab.spoofedLat;
+                      activeTab.spoofedLng =
+                          double.tryParse(lngController.text) ??
+                          activeTab.spoofedLng;
+                    });
+
+                    // Sync the new location and reload the page so the website updates!
+                    await LocationSpoofingService.syncLocation(
+                      activeTab.webViewController,
+                      activeTab.isLocationSpoofed,
+                      activeTab.spoofedLat,
+                      activeTab.spoofedLng,
+                    );
+                    activeTab.webViewController?.reload();
+
+                    if (context.mounted) Navigator.pop(context);
+                  },
+                  child: const Text(
+                    'Save & Reload',
+                    style: TextStyle(color: Colors.greenAccent),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // Automates a seamless 1-second app restart for this specific profile!
+  void _restartProfileWindow() {
+    // 1. Launch a brand new window for this profile (it will read the new proxy on boot!)
+    AppProfileService.launchProfileWindow(widget.appProfile);
+
+    // 2. Kill this current window
+    windowManager.close();
+  }
+
+  void _showProxyDialog() async {
+    final currentProxy = await ProxyManagerService.getActiveProxy(
+      widget.paneId,
+      widget.appProfile,
+    );
+
+    if (!mounted) return;
+
+    // Open our beautiful new UI!
+    final result = await showDialog(
+      context: context,
+      builder: (context) => ProxyManagerDialog(activeProxy: currentProxy),
+    );
+
+    // If the user clicked "Turn Off Proxy"
+    if (result == "CLEAR") {
+      await ProxyManagerService.assignProxy(
+        widget.paneId,
+        widget.appProfile,
+        null,
+      );
+      _restartProfileWindow();
+    }
+    // If the user clicked a specific proxy row to assign it
+    else if (result is ProxyItem) {
+      await ProxyManagerService.assignProxy(
+        widget.paneId,
+        widget.appProfile,
+        result,
+      );
+      _restartProfileWindow();
+    }
+  }
+
+  // --- BUILD WEBVIEW FOR A SPECIFIC TAB ---
+  Widget _buildWebViewForTab(BrowserTab tab) {
+    return InAppWebView(
+      key: ValueKey(tab.id),
+      webViewEnvironment: _isolatedEnvironment,
+      initialUrlRequest: URLRequest(url: WebUri(tab.url)),
+      initialSettings: InAppWebViewSettings(
+        javaScriptEnabled: true,
+        cacheEnabled: true,
+        thirdPartyCookiesEnabled: true,
+        transparentBackground: true,
+        supportMultipleWindows: true,
+        useShouldInterceptRequest: true,
+        useOnDownloadStart: true,
+      ),
+
+      initialUserScripts: UnmodifiableListView<UserScript>([
+        MediaSpoofingService.getSpoofingScript(),
+        CanvasSpoofingService.getSpoofingScript(),
+        ApiRewriterService.getSetupScript(),
+        LocationSpoofingService.getSetupScript(),
+        AdBlockerService.getCosmeticBlockerScript(),
+        WebRTCShieldService.getSetupScript(),
+      ]),
+
+      onWebViewCreated: (controller) {
+        tab.webViewController = controller;
+
+        // --- LISTEN FOR API LOGS FROM JAVASCRIPT ---
+        controller.addJavaScriptHandler(
+          handlerName: 'apiSniffer',
+          callback: (args) {
+            if (args.isNotEmpty) {
+              final data = args[0];
+              if (mounted) {
+                setState(() {
+                  tab.apiLogs.add(
+                    ApiLog(
+                      type: data['type']?.toString() ?? 'UKN',
+                      method: data['method']?.toString() ?? 'GET',
+                      url: data['url']?.toString() ?? '',
+                      status: data['status'] is int ? data['status'] : 0,
+                    ),
+                  );
+                });
+              }
+            }
+          },
+        );
+
+        // --- LISTEN FOR THE ZAPPER FINISHING ---
+        controller.addJavaScriptHandler(
+          handlerName: 'zapperFinished',
+          callback: (args) async {
+            if (args.isNotEmpty) {
+              final data = args[0];
+              final domain = ElementZapperService.getDomainFromUrl(tab.url);
+
+              final newZap = ZappedElement(
+                id: DateTime.now().millisecondsSinceEpoch.toString(),
+                domain: domain,
+                selector: data['selector'],
+                name: data['name'],
+              );
+
+              // Save it to hard drive
+              await ElementZapperService.saveZap(newZap, widget.appProfile);
+
+              if (mounted) {
+                setState(() {
+                  tab.isZappingCurrently = false; // Turn off crosshair
+                  tab.activeZaps.add(newZap); // sidebar
+                });
+                // Instantly hide it permanently!
+                ElementZapperService.applySavedZaps(
+                  tab.webViewController,
+                  tab.activeZaps, 
+                );
+              }
+            }
+          },
+        );
+      },
+
+      // --- POPUP & NEW WINDOW HANDLER ---
+      onCreateWindow: (controller, createWindowAction) async {
+        final urlToOpen = createWindowAction.request.url;
+
+        if (urlToOpen != null && urlToOpen.toString().isNotEmpty) {
+          // 1. Grab the hidden URL the website was trying to open
+          final newUrl = urlToOpen.toString();
+
+          // 2. Spawn a brand new tab inside our app with that URL!
+          if (mounted) {
+            _addNewTab(newUrl);
+          }
+        }
+
+        // 3. Return TRUE to tell the C++ engine "Don't crash, we handled the popup natively!"
+        return true;
+      },
+      // ----------------------------------
+
+      // --- PROXY & HTTP AUTHENTICATION INTERCEPTOR ---
+      // --- PROXY & HTTP AUTHENTICATION INTERCEPTOR ---
+      // --- PROXY & HTTP AUTHENTICATION INTERCEPTOR ---
+      onReceivedHttpAuthRequest: (controller, challenge) async {
+        // 3. Use the instantly available RAM variable instead of waiting for the hard drive!
+        if (_activeProxy != null &&
+            _activeProxy!.username.isNotEmpty &&
+            _activeProxy!.password.isNotEmpty) {
+          debugPrint("Injecting Proxy Auth for ${_activeProxy!.hostPort}...");
+          return HttpAuthResponse(
+            username: _activeProxy!.username.trim(),
+            password: _activeProxy!.password.trim(),
+            action: HttpAuthResponseAction.PROCEED,
+          );
+        }
+
+        return HttpAuthResponse(action: HttpAuthResponseAction.CANCEL);
+      },
+      // -----------------------------------------------
+      // -----------------------------------------------
+
+      // 1. Silently grant general permissions (Camera, Microphone, etc.)
+      onPermissionRequest: (controller, request) async {
+        return PermissionResponse(
+          resources: request.resources,
+          action: PermissionResponseAction.GRANT,
+        );
+      },
+
+      // 2. Silently grant Geolocation requests so Windows doesn't panic
+      onGeolocationPermissionsShowPrompt: (controller, origin) async {
+        return GeolocationPermissionShowPromptResponse(
+          origin: origin,
+          allow: true,
+          retain: true,
+        );
+      },
+
+      onTitleChanged: (controller, title) {
+        if (title != null) setState(() => tab.title = title);
+      },
+
+      shouldInterceptRequest: (controller, request) async {
+        // We removed the '!= null' check because it is guaranteed to be safe!
+        final urlString = request.url.toString();
+
+        // 1. ADVANCED AD BLOCKER
+        if (AdBlockerService.isAdUrl(urlString)) {
+          return WebResourceResponse(
+            contentType: 'text/plain',
+            data: Uint8List.fromList([]),
+            statusCode: 403,
+            reasonPhrase: 'Blocked by AdBlocker',
+          );
+        }
+
+        // 2. RAW MEDIA SNIFFER!
+        final lowerUrl = urlString.toLowerCase();
+        if (lowerUrl.contains('.mp4') ||
+            lowerUrl.contains('.webm') ||
+            lowerUrl.contains('.m3u8')) {
+          if (!tab.detectedMediaUrls.contains(urlString)) {
+            // Safely add it to the UI state without breaking the background thread
+            Future.microtask(() {
+              if (mounted) setState(() => tab.detectedMediaUrls.add(urlString));
+            });
+          }
+        }
+
+        return null;
+      },
+
+      // ---------------------------------------
+      onFindResultReceived:
+          (controller, activeMatchOrdinal, numberOfMatches, isDoneCounting) {
+            if (mounted) {
+              setState(() {
+                tab.currentMatch = activeMatchOrdinal;
+                tab.totalMatches = numberOfMatches;
+              });
+            }
+          },
+      onLoadStart: (controller, url) async {
+        setState(() {
+          tab.detectedMediaUrls.clear();
+        });
+
+        controller.evaluateJavascript(
+          source: ApiSnifferService.injectionScript,
+        );
+
+        setState(() => tab.isZapperActive = false);
+
+        // --- SYNC THE REWRITE RULES INTO THE PAGE ---
+        await ApiRewriterService.syncRulesToBrowser(
+          controller,
+          widget.appProfile,
+        );
+
+        // --- SYNC GPS LOCATION TO BROWSER ---
+        await LocationSpoofingService.syncLocation(
+          controller,
+          tab.isLocationSpoofed,
+          tab.spoofedLat,
+          tab.spoofedLng,
+        );
+
+        await WebRTCShieldService.syncShield(
+          controller,
+          tab.isWebRTCShieldEnabled,
+        );
+
+        if (url != null) {
+          setState(() {
+            tab.url = url.toString();
+            if (_tabs[_currentTabIndex].id == tab.id) {
+              _urlController.text = tab.url;
+            }
+          });
+        }
+      },
+
+      onLoadStop: (controller, url) async {
+        if (url != null) {
+          setState(() {
+            tab.url = url.toString();
+            if (_tabs[_currentTabIndex].id == tab.id) {
+              _urlController.text = tab.url;
+            }
+          });
+        }
+        await ZoomService.applyZoom(controller, tab.zoom);
+
+        await ScriptInjectorService.injectScripts(
+          controller,
+          tab.url,
+          widget.appProfile,
+        );
+
+        await controller.evaluateJavascript(
+          source: ElementZapperService.setupScript,
+        );
+        final domain = ElementZapperService.getDomainFromUrl(tab.url);
+        final allZaps = await ElementZapperService.loadZaps(widget.appProfile);
+
+        if (mounted) {
+          setState(() {
+            // Filter the database to only show Zaps for the current website
+            tab.activeZaps = allZaps.where((z) => z.domain == domain).toList();
+          });
+          // Inject the CSS to hide them immediately!
+          await ElementZapperService.applySavedZaps(controller, tab.activeZaps);
+        }
+      },
+      onProgressChanged: (controller, progress) {
+        setState(() => tab.progress = progress / 100);
+      },
+
+      onDownloadStartRequest: (controller, downloadRequest) async {
+        await DownloadManagerService.handleDownload(downloadRequest);
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // 1. Wrap the entire pane in a Focus widget so it listens to the keyboard
+    return Focus(
+      autofocus: true,
+      // 2. Map your keyboard shortcuts to your functions!
+      child: CallbackShortcuts(
+        bindings: {
+          // Ctrl + T (New Tab)
+          const SingleActivator(LogicalKeyboardKey.keyT, control: true): () {
+            _addNewTab();
+          },
+          // Ctrl + W (Close Current Tab)
+          const SingleActivator(LogicalKeyboardKey.keyW, control: true): () {
+            _closeTab(_currentTabIndex);
+          },
+          // Ctrl + R (Reload Page)
+          const SingleActivator(LogicalKeyboardKey.keyR, control: true): () {
+            activeTab.webViewController?.reload();
+          },
+          // Ctrl + F (Find on Page)
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true): () {
+            setState(() {
+              activeTab.isFindVisible = !activeTab.isFindVisible;
+              if (!activeTab.isFindVisible) {
+                activeTab.webViewController?.clearMatches();
+                activeTab.findController.clear();
+              }
+            });
+          },
+        },
+        // 3. Your existing UI goes right here
+        child: Column(
+          children: [
+            // 1. HORIZONTAL TAB BAR
+            Container(
+              height: 40,
+              color: Colors.black,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _tabs.length,
+                      itemBuilder: (context, index) {
+                        final tab = _tabs[index];
+                        final isActive = index == _currentTabIndex;
+
+                        return GestureDetector(
+                          onTap: () => _switchTab(index),
+                          child: Container(
+                            width: 160,
+                            margin: const EdgeInsets.only(
+                              top: 4,
+                              right: 2,
+                              left: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: isActive
+                                  ? Colors.grey[900]
+                                  : Colors.grey[850],
+                              borderRadius: const BorderRadius.vertical(
+                                top: Radius.circular(8),
+                              ),
+                              border: isActive
+                                  ? Border.all(color: Colors.grey[700]!)
+                                  : null,
+                            ),
+                            child: Row(
+                              children: [
+                                const SizedBox(width: 10),
+                                // Tab Favicon
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(2),
+                                  child: Image.network(
+                                    FaviconService.getFaviconUrl(tab.url),
+                                    width: 14,
+                                    height: 14,
+                                    // If the website has no icon (or it fails to load), fallback to the Globe!
+                                    errorBuilder:
+                                        (context, error, stackTrace) => Icon(
+                                          Icons.public,
+                                          size: 14,
+                                          color: isActive
+                                              ? Colors.blue
+                                              : Colors.grey,
+                                        ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                // Tab Title
+                                Expanded(
+                                  child: Text(
+                                    tab.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: isActive
+                                          ? Colors.white
+                                          : Colors.grey,
+                                    ),
+                                  ),
+                                ),
+                                // Close Tab Button
+                                IconButton(
+                                  icon: const Icon(Icons.close, size: 14),
+                                  color: Colors.grey,
+                                  onPressed: () => _closeTab(index),
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
+                                ),
+                                const SizedBox(width: 4),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  // TAB BUTTON
+                  IconButton(
+                    icon: const Icon(Icons.add, color: Colors.white),
+                    onPressed: _addNewTab,
+                    tooltip: 'New Tab (Ctrl+T)',
+                    splashRadius: 20,
+                  ),
+
+                  // --- THE NEW LOCATION FOR PROFILE MANAGER ---
+                  Container(width: 1, height: 20, color: Colors.grey[700]),
+
+                  TextButton.icon(
+                    icon: const Icon(
+                      Icons.manage_accounts,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
+                    label: Text(
+                      widget.appProfile,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                    onPressed: _showProfileManager,
+                  ),
+                  const SizedBox(width: 4),
+
+                  // --- SPLIT SCREEN TOGGLE BUTTON ---
+                  Container(width: 1, height: 20, color: Colors.grey[700]),
+                  IconButton(
+                    // Dynamically changes icon based on state
+                    icon: Icon(
+                      widget.isSplit ? Icons.fullscreen : Icons.vertical_split,
+                      color: Colors.white70,
+                      size: 18,
+                    ),
+                    tooltip: widget.isSplit
+                        ? 'Close Split View'
+                        : 'Open Split View',
+                    onPressed: widget.onToggleSplit,
+                    splashRadius: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  // --------
+                ],
+              ),
+            ),
+
+            // 2. MAIN TOOLBAR (Reads from activeTab)
+            Container(
+              color: Colors.grey[900],
+              padding: const EdgeInsets.symmetric(
+                horizontal: 4.0,
+                vertical: 8.0,
+              ),
+              child: Row(
+                children: [
+                  // 1. Profile Dropdown
+                  PopupMenuButton<BrowserProfile>(
+                    icon: const Icon(
+                      Icons.person_pin,
+                      color: Colors.blueAccent,
+                    ),
+                    tooltip: 'Select Saved Profile',
+                    onSelected: (profile) {
+                      // If they select a profile, open it in a NEW tab!
+                      _addNewTab(profile.url);
+                    },
+                    itemBuilder: (context) {
+                      if (_profiles.isEmpty) {
+                        return [
+                          PopupMenuItem<BrowserProfile>(
+                            value: BrowserProfile(
+                              id: 'dummy',
+                              name: 'No Profiles',
+                              url: '',
+                              faviconUrl: '',
+                            ),
+                            enabled: false,
+                            child: const Text('No Profiles Saved'),
+                          ),
+                        ];
+                      }
+                      return _profiles.map((profile) {
+                        final iconUrl = profile.faviconUrl.isNotEmpty
+                            ? profile.faviconUrl
+                            : FaviconService.getFaviconUrl(profile.url);
+                        return PopupMenuItem<BrowserProfile>(
+                          value: profile,
+                          child: Row(
+                            children: [
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: Image.network(
+                                  iconUrl,
+                                  width: 24,
+                                  height: 24,
+                                  errorBuilder: (context, error, stackTrace) =>
+                                      const Icon(
+                                        Icons.public,
+                                        size: 24,
+                                        color: Colors.grey,
+                                      ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Text(
+                                  profile.name,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList();
+                    },
+                  ),
+
+                  // 2. BACK BUTTON
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back, color: Colors.white70),
+                    tooltip: 'Go Back',
+                    onPressed: () async {
+                      // Check if there is a history to go back to for this specific tab
+                      if (await activeTab.webViewController?.canGoBack() ??
+                          false) {
+                        activeTab.webViewController?.goBack();
+                      }
+                    },
+                  ),
+
+                  // 3. FORWARD BUTTON
+                  IconButton(
+                    icon: const Icon(
+                      Icons.arrow_forward,
+                      color: Colors.white70,
+                    ),
+                    tooltip: 'Go Forward',
+                    onPressed: () async {
+                      if (await activeTab.webViewController?.canGoForward() ??
+                          false) {
+                        activeTab.webViewController?.goForward();
+                      }
+                    },
+                  ),
+
+                  // 4. REFRESH BUTTON
+                  IconButton(
+                    icon: const Icon(Icons.refresh, color: Colors.white70),
+                    tooltip: 'Reload Page',
+                    onPressed: () {
+                      activeTab.webViewController?.reload();
+                    },
+                  ),
+
+                  // --- CLEAR CURRENT TAB DATA (Privacy Button) ---
+                  IconButton(
+                    icon: const Icon(
+                      Icons.cleaning_services,
+                      color: Colors.amber,
+                    ),
+                    tooltip: 'Clear Site Data (Current Tab)',
+                    onPressed: () async {
+                      final controller = activeTab.webViewController;
+                      if (controller == null) return;
+
+                      // 1. Clear the WebView's active RAM cache for this specific tab
+                      await controller.clearCache();
+
+                      // 2. Inject a script to obliterate LocalStorage, SessionStorage, and Site Cookies!
+                      await controller.evaluateJavascript(
+                        source: """
+                    // Clear Local & Session Storage
+                    localStorage.clear();
+                    sessionStorage.clear();
+                    
+                    // Clear all cookies tied to this specific website
+                    document.cookie.split(';').forEach(function(c) { 
+                      document.cookie = c.replace(/^ +/, '').replace(/=.*/, '=;expires=' + new Date().toUTCString() + ';path=/'); 
+                    });
+                  """,
+                      );
+
+                      // 3. Show a quick confirmation popup at the bottom of the screen
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Cleared data for: ${activeTab.title}',
+                            ),
+                            duration: const Duration(seconds: 2),
+                            backgroundColor: Colors.amber[800],
+                          ),
+                        );
+                      }
+
+                      // 4. Reload the page so the website realizes it has been logged out/cleared
+                      await controller.reload();
+                    },
+                  ),
+
+                  Expanded(
+                    child: TextField(
+                      controller: _urlController,
+                      keyboardType: TextInputType.url,
+                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                      decoration: InputDecoration(
+                        hintText: 'Search or type URL',
+                        hintStyle: const TextStyle(color: Colors.grey),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 10,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide.none,
+                        ),
+                        filled: true,
+                        fillColor: Colors.black54,
+                      ),
+                      onSubmitted: _loadUrl,
+                    ),
+                  ),
+                  // --- MOBILE VIEW TOGGLE ---
+                  IconButton(
+                    // Change the icon to a phone if mobile, or desktop if desktop!
+                    icon: Icon(
+                      activeTab.isMobileView
+                          ? Icons.phone_android
+                          : Icons.desktop_windows,
+                      color: activeTab.isMobileView
+                          ? Colors.blueAccent
+                          : Colors.white70,
+                    ),
+                    tooltip: activeTab.isMobileView
+                        ? 'Switch to Desktop View'
+                        : 'Switch to Mobile View',
+                    onPressed: () async {
+                      setState(() {
+                        activeTab.isMobileView = !activeTab.isMobileView;
+                      });
+                      // Call our new service to apply the change and reload the page
+                      await UserAgentService.toggleMobileView(
+                        activeTab.webViewController,
+                        activeTab.isMobileView,
+                      );
+                    },
+                  ),
+
+                  // --- API SNIFFER BUTTON ---
+                  IconButton(
+                    icon: Icon(
+                      Icons.network_check,
+                      color: activeTab.isSnifferVisible
+                          ? Colors.cyanAccent
+                          : Colors.white70,
+                    ),
+                    tooltip: 'Network API Sniffer',
+                    onPressed: () {
+                      setState(() {
+                        activeTab.isSnifferVisible =
+                            !activeTab.isSnifferVisible;
+                      });
+                    },
+                  ),
+
+                  // --- API REWRITER BUTTON ---
+                  IconButton(
+                    icon: const Icon(
+                      Icons.transform,
+                      color: Colors.purpleAccent,
+                    ),
+                    tooltip: 'Mock API Responses',
+                    onPressed: _showRewriterDialog,
+                  ),
+
+                  // --- GPS SPOOFER BUTTON ---
+                  IconButton(
+                    icon: Icon(
+                      activeTab.isLocationSpoofed
+                          ? Icons.location_on
+                          : Icons.location_off,
+                      color: activeTab.isLocationSpoofed
+                          ? Colors.greenAccent
+                          : Colors.white70,
+                    ),
+                    tooltip: 'Spoof GPS Location',
+                    onPressed: _showLocationSpooferDialog,
+                  ),
+
+                  // --- PROXY SPLIT-TUNNELING BUTTON ---
+                  // --- PROXY SPLIT-TUNNELING BUTTON ---
+                  IconButton(
+                    icon: FutureBuilder<ProxyItem?>(
+                      future: ProxyManagerService.getActiveProxy(
+                        widget.paneId,
+                        widget.appProfile,
+                      ),
+                      builder: (context, snapshot) {
+                        final hasProxy =
+                            snapshot.hasData && snapshot.data != null;
+                        return Icon(
+                          hasProxy ? Icons.security : Icons.shield_outlined,
+                          color: hasProxy
+                              ? Colors.orangeAccent
+                              : Colors.white70,
+                        );
+                      },
+                    ),
+                    tooltip: 'Proxy Manager',
+                    onPressed: _showProxyDialog,
+                  ),
+
+                  // --- WEBRTC LEAK SHIELD BUTTON ---
+                  IconButton(
+                    icon: Icon(
+                      activeTab.isWebRTCShieldEnabled
+                          ? Icons.vpn_lock
+                          : Icons.public_off,
+                      color: activeTab.isWebRTCShieldEnabled
+                          ? Colors.redAccent
+                          : Colors.white70,
+                    ),
+                    tooltip: 'WebRTC IP Leak Shield',
+                    onPressed: () async {
+                      setState(() {
+                        activeTab.isWebRTCShieldEnabled =
+                            !activeTab.isWebRTCShieldEnabled;
+                      });
+                      // Sync instantly with the live page!
+                      await WebRTCShieldService.syncShield(
+                        activeTab.webViewController,
+                        activeTab.isWebRTCShieldEnabled,
+                      );
+                    },
+                  ),
+
+                  // --- ELEMENT ZAPPER BUTTON ---
+                  IconButton(
+                    icon: Icon(
+                      activeTab.isZapperPanelVisible
+                          ? Icons.bolt
+                          : Icons.offline_bolt_outlined,
+                      color: activeTab.isZapperPanelVisible
+                          ? Colors.redAccent
+                          : Colors.white70,
+                    ),
+                    tooltip: 'Element Zapper (Remove Annoyances)',
+                    onPressed: () {
+                      setState(() {
+                        activeTab.isZapperPanelVisible =
+                            !activeTab.isZapperPanelVisible;
+                        if (!activeTab.isZapperPanelVisible &&
+                            activeTab.isZappingCurrently) {
+                          activeTab.isZappingCurrently = false;
+                          ElementZapperService.toggleZapperMode(
+                            activeTab.webViewController,
+                            false,
+                          );
+                        }
+                      });
+                    },
+                  ),
+
+                  // --- CUSTOM JS INJECTOR BUTTON ---
+                  IconButton(
+                    icon: const Icon(Icons.code, color: Colors.greenAccent),
+                    tooltip: 'Inject Custom JavaScript',
+                    onPressed: _showScriptEditorDialog,
+                  ),
+
+                  // --- PICTURE-IN-PICTURE (PiP) BUTTON ---
+                  IconButton(
+                    icon: const Icon(
+                      Icons.picture_in_picture_alt,
+                      color: Colors.blueAccent,
+                    ),
+                    tooltip: 'Pop Out Video (PiP)',
+                    onPressed: () =>
+                        MediaSuperpowersService.togglePictureInPicture(
+                          activeTab.webViewController,
+                        ),
+                  ),
+
+                  // --- MEDIA SNIFFER BUTTON ---
+                  IconButton(
+                    icon: Icon(
+                      Icons.video_camera_back,
+                      color:
+                          (activeTab.detectedMediaUrls.isNotEmpty ||
+                              YoutubeDownloaderService.isYoutubeUrl(
+                                activeTab.url,
+                              ))
+                          ? Colors.greenAccent
+                          : Colors.white70,
+                    ),
+                    tooltip: 'Download Hidden Videos',
+                    onPressed: _showMediaSnifferDialog,
+                  ),
+
+                  IconButton(
+                    icon: const Icon(Icons.bookmark_add, color: Colors.white70),
+                    tooltip: 'Save Session Profile',
+                    onPressed: _showSaveProfileDialog,
+                  ),
+                ],
+              ),
+            ),
+
+            // 3. TAB-SPECIFIC FIND BAR
+            if (activeTab.isFindVisible)
+              FindBar(
+                controller: activeTab.findController,
+                currentMatch: activeTab.currentMatch,
+                totalMatches: activeTab.totalMatches,
+                onChanged: (value) {
+                  if (value.isEmpty) {
+                    activeTab.webViewController?.clearMatches();
+                    setState(() {
+                      activeTab.currentMatch = 0;
+                      activeTab.totalMatches = 0;
+                    });
+                  } else {
+                    activeTab.webViewController?.findAllAsync(find: value);
+                  }
+                },
+                onNext: () =>
+                    activeTab.webViewController?.findNext(forward: true),
+                onPrev: () =>
+                    activeTab.webViewController?.findNext(forward: false),
+                onClose: () {
+                  setState(() => activeTab.isFindVisible = false);
+                  activeTab.findController.clear();
+                  // ignore: deprecated_member_use
+                  activeTab.webViewController?.clearMatches();
+                },
+              ),
+
+            // 4. TAB-SPECIFIC PROGRESS BAR
+            if (activeTab.progress < 1.0 && !_isLoadingEnvironment)
+              LinearProgressIndicator(
+                value: activeTab.progress,
+                color: Colors.blue,
+                minHeight: 2,
+              ),
+
+            // 5. THE INDEXED STACK (Holds all WebViews in memory!)
+            // 5 & 6. THE MAIN WEBVIEW AND THE SIDEBAR
+            Expanded(
+              child: Row(
+                children: [
+                  // 5. THE INDEXED STACK (Holds all WebViews in memory!)
+                  Expanded(
+                    child: _isLoadingEnvironment
+                        ? const Center(child: CircularProgressIndicator())
+                        : IndexedStack(
+                            index: _currentTabIndex,
+                            children: _tabs
+                                .map((tab) => _buildWebViewForTab(tab))
+                                .toList(),
+                          ),
+                  ),
+
+                  // --- 6. API SNIFFER PANEL (Now slides out from the right!) ---
+                  if (activeTab.isSnifferVisible)
+                    ApiSnifferPanel(
+                      logs: activeTab.apiLogs,
+                      onClear: () {
+                        setState(() => activeTab.apiLogs.clear());
+                      },
+                      onClose: () {
+                        setState(() => activeTab.isSnifferVisible = false);
+                      },
+                    ),
+
+                  // --- 7. ZAPPER PANEL (Slides out from the right!) ---
+                  if (activeTab.isZapperPanelVisible)
+                    ZapperPanel(
+                      zaps: activeTab.activeZaps,
+                      isZappingCurrently: activeTab.isZappingCurrently,
+                      onStartZapping: () {
+                        setState(() {
+                          activeTab.isZappingCurrently =
+                              !activeTab.isZappingCurrently;
+                        });
+                        ElementZapperService.toggleZapperMode(
+                          activeTab.webViewController,
+                          activeTab.isZappingCurrently,
+                        );
+                      },
+                      onUnblock: (zapId) async {
+                        // Remove from hard drive
+                        await ElementZapperService.removeZap(
+                          zapId,
+                          widget.appProfile,
+                        );
+                        setState(() {
+                          activeTab.activeZaps.removeWhere(
+                            (z) => z.id == zapId,
+                          );
+                        });
+                        // Instantly un-hide it on the webpage!
+                        ElementZapperService.applySavedZaps(
+                          activeTab.webViewController,
+                          activeTab.activeZaps,
+                        );
+                      },
+                      onClose: () {
+                        setState(() {
+                          activeTab.isZapperPanelVisible = false;
+                          activeTab.isZappingCurrently = false;
+                        });
+                        ElementZapperService.toggleZapperMode(
+                          activeTab.webViewController,
+                          false,
+                        );
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ), // 1. This closes the Column
+      ), // 2. This closes CallbackShortcuts
+    ); // 3. This closes Focus
+  } // This closes the build method
+
+  // --- MEDIA SNIFFER UI ---
+  // --- MEDIA SNIFFER UI ---
+  void _showMediaSnifferDialog() {
+    // Check if we are currently looking at a YouTube video
+    final isYoutube = YoutubeDownloaderService.isYoutubeUrl(activeTab.url);
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text(
+            'Caught Media Files',
+            style: TextStyle(color: Colors.greenAccent),
+          ),
+          content: SizedBox(
+            width: 500,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // --- SPECIAL YOUTUBE BUTTON ---
+                if (isYoutube) ...[
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.red[900]?.withOpacity(0.3),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.play_circle_fill,
+                          color: Colors.redAccent,
+                          size: 30,
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text(
+                            "YouTube Video Detected!",
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.download),
+                          label: const Text('Download MP4'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.redAccent,
+                            foregroundColor: Colors.white,
+                          ),
+                          onPressed: () {
+                            Navigator.pop(context);
+                            YoutubeDownloaderService.downloadVideo(
+                              activeTab.url,
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 30, color: Colors.grey),
+                ],
+
+                // --- STANDARD RAW SNIFFER LIST ---
+                if (activeTab.detectedMediaUrls.isEmpty)
+                  const Text(
+                    "No raw video files detected in network traffic.",
+                    style: TextStyle(color: Colors.grey),
+                  )
+                else
+                  ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: activeTab.detectedMediaUrls.length,
+                    itemBuilder: (context, index) {
+                      final url = activeTab.detectedMediaUrls.elementAt(index);
+                      return ListTile(
+                        title: Text(
+                          url,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        trailing: ElevatedButton.icon(
+                          icon: const Icon(Icons.download, size: 16),
+                          label: const Text('Download'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.green[800],
+                          ),
+                          onPressed: () {
+                            Navigator.pop(context);
+                            DownloadManagerService.downloadDirectUrl(url);
+                          },
+                        ),
+                      );
+                    },
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+} // This closes

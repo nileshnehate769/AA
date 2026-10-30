@@ -1,0 +1,103 @@
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class ProxyItem {
+  final String id;
+  final String name;
+  final String hostPort;
+  final String username;
+  final String password;
+
+  ProxyItem({
+    required this.id,
+    required this.name,
+    required this.hostPort,
+    this.username = '',
+    this.password = '',
+  });
+
+  Map<String, dynamic> toMap() => {
+    'id': id,
+    'name': name,
+    'hostPort': hostPort,
+    'username': username,
+    'password': password,
+  };
+
+  factory ProxyItem.fromMap(Map<String, dynamic> map) => ProxyItem(
+    id: map['id']?.toString() ?? '',
+    name: map['name']?.toString() ?? 'Unnamed Proxy',
+    hostPort: map['hostPort']?.toString() ?? '',
+    username: map['username']?.toString() ?? '',
+    password: map['password']?.toString() ?? '',
+  );
+
+  String toJson() => json.encode(toMap());
+  factory ProxyItem.fromJson(String source) =>
+      ProxyItem.fromMap(json.decode(source));
+}
+
+class ProxyManagerService {
+  static const String _listKey = 'saved_proxy_list';
+
+  static Future<List<ProxyItem>> getSavedProxies() async {
+    final prefs = await SharedPreferences.getInstance();
+    final jsonList = prefs.getStringList(_listKey) ?? [];
+    return jsonList.map((j) => ProxyItem.fromJson(j)).toList();
+  }
+
+  static Future<void> saveProxy(ProxyItem proxy) async {
+    final prefs = await SharedPreferences.getInstance();
+    final proxies = await getSavedProxies();
+
+    final index = proxies.indexWhere((p) => p.id == proxy.id);
+    if (index >= 0) {
+      proxies[index] = proxy;
+    } else {
+      proxies.add(proxy);
+    }
+    await prefs.setStringList(
+      _listKey,
+      proxies.map((p) => p.toJson()).toList(),
+    );
+  }
+
+  static Future<void> deleteProxy(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    final proxies = await getSavedProxies();
+    proxies.removeWhere((p) => p.id == id);
+    await prefs.setStringList(
+      _listKey,
+      proxies.map((p) => p.toJson()).toList(),
+    );
+  }
+
+  static Future<void> assignProxy(
+    String paneId,
+    String appProfile,
+    ProxyItem? proxy,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'active_proxy_${appProfile}_$paneId';
+    if (proxy == null) {
+      await prefs.remove(key);
+    } else {
+      await prefs.setString(key, proxy.toJson());
+    }
+  }
+
+  static Future<ProxyItem?> getActiveProxy(
+    String paneId,
+    String appProfile,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final key = 'active_proxy_${appProfile}_$paneId';
+    final jsonStr = prefs.getString(key);
+    if (jsonStr == null) return null;
+    try {
+      return ProxyItem.fromJson(jsonStr);
+    } catch (e) {
+      return null;
+    }
+  }
+}

@@ -1,0 +1,228 @@
+import 'package:flutter/material.dart';
+import '../services/proxy_service.dart';
+
+class ProxyManagerDialog extends StatefulWidget {
+  final ProxyItem? activeProxy;
+  const ProxyManagerDialog({super.key, required this.activeProxy});
+
+  @override
+  State<ProxyManagerDialog> createState() => _ProxyManagerDialogState();
+}
+
+class _ProxyManagerDialogState extends State<ProxyManagerDialog> {
+  List<ProxyItem> _proxies = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadProxies();
+  }
+
+  Future<void> _loadProxies() async {
+    final proxies = await ProxyManagerService.getSavedProxies();
+    setState(() => _proxies = proxies);
+  }
+
+  void _showAddEditDialog([ProxyItem? existingProxy]) {
+    final nameCtrl = TextEditingController(text: existingProxy?.name ?? '');
+    final hostCtrl = TextEditingController(text: existingProxy?.hostPort ?? '');
+    final userCtrl = TextEditingController(text: existingProxy?.username ?? '');
+    final passCtrl = TextEditingController(text: existingProxy?.password ?? '');
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          existingProxy == null ? 'Add New Proxy' : 'Edit Proxy',
+          style: const TextStyle(color: Colors.orangeAccent),
+        ),
+        content: SizedBox(
+          width: 400,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Proxy Name (e.g., USA Datacenter)',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: hostCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'IP:Port (e.g., 185.19.22.1:8080)',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: userCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Username (Optional)',
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: passCtrl,
+                obscureText: true,
+                decoration: const InputDecoration(
+                  labelText: 'Password (Optional)',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () async {
+              if (nameCtrl.text.isNotEmpty && hostCtrl.text.isNotEmpty) {
+                final newProxy = ProxyItem(
+                  id:
+                      existingProxy?.id ??
+                      DateTime.now().millisecondsSinceEpoch.toString(),
+                  name: nameCtrl.text,
+                  hostPort: hostCtrl.text,
+                  username: userCtrl.text,
+                  password: passCtrl.text,
+                );
+                await ProxyManagerService.saveProxy(newProxy);
+                await _loadProxies();
+                if (context.mounted) Navigator.pop(context);
+              }
+            },
+            child: const Text(
+              'Save',
+              style: TextStyle(color: Colors.orangeAccent),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(Icons.security, color: Colors.orangeAccent),
+          const SizedBox(width: 8),
+          const Expanded(child: Text('Proxy Manager')),
+          TextButton.icon(
+            icon: const Icon(Icons.public_off, color: Colors.redAccent),
+            label: const Text(
+              'Turn Off Proxy',
+              style: TextStyle(color: Colors.redAccent),
+            ),
+            onPressed: () => Navigator.pop(context, "CLEAR"),
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: 500,
+        height: 400,
+        child: Column(
+          children: [
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add),
+              label: const Text('Add New Proxy'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size.fromHeight(40),
+              ),
+              onPressed: () => _showAddEditDialog(),
+            ),
+            const Divider(),
+            Expanded(
+              child: _proxies.isEmpty
+                  ? const Center(
+                      child: Text(
+                        "No proxies saved.",
+                        style: TextStyle(color: Colors.grey),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: _proxies.length,
+                      itemBuilder: (context, index) {
+                        final proxy = _proxies[index];
+                        final isActive = widget.activeProxy?.id == proxy.id;
+
+                        return Card(
+                          // FIX: Used withValues(alpha:) instead of deprecated withOpacity()
+                          color: isActive
+                              ? Colors.orange[900]?.withValues(alpha: 0.3)
+                              : Colors.grey[850],
+                          shape: RoundedRectangleBorder(
+                            side: BorderSide(
+                              color: isActive
+                                  ? Colors.orangeAccent
+                                  : Colors.transparent,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: ListTile(
+                            title: Text(
+                              proxy.name,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            subtitle: Text(
+                              proxy.hostPort,
+                              style: const TextStyle(color: Colors.white70),
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (isActive)
+                                  const Text(
+                                    'ACTIVE  ',
+                                    style: TextStyle(
+                                      color: Colors.orangeAccent,
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.edit,
+                                    color: Colors.blue,
+                                  ),
+                                  onPressed: () => _showAddEditDialog(proxy),
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.delete,
+                                    color: Colors.red,
+                                  ),
+                                  onPressed: () async {
+                                    await ProxyManagerService.deleteProxy(
+                                      proxy.id,
+                                    );
+                                    _loadProxies();
+                                  },
+                                ),
+                              ],
+                            ),
+                            onTap: () => Navigator.pop(context, proxy),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
