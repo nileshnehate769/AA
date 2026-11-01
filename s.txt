@@ -1,0 +1,2564 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:isolate';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart'; // Required for Clipboard
+
+import '../models/proxy_record.dart';
+import '../services/dns_resolver_service.dart';
+import '../services/ech_inspector_service.dart';
+import '../services/network_service.dart';
+import '../services/file_service.dart';
+import '../services/proxy_scraper_service.dart';
+import '../services/geoip_service.dart';
+import '../services/export_service.dart';
+import '../services/local_gateway_service.dart';
+import '../services/ssl_integrity_service.dart';
+import '../services/system_proxy_service.dart';
+import '../services/storage_service.dart';
+import '../services/system_tray_service.dart';
+import '../models/app_accent_color.dart';
+import '../models/proxy_source.dart';
+import '../services/database_service.dart';
+import '../services/support_bundle_service.dart';
+import '../services/platform_probe_service.dart';
+import '../services/ipv6_defense_service.dart';
+import '../services/domain_shield_service.dart';
+import '../services/local_socks5_service.dart';
+import '../models/gateway_traffic_entry.dart';
+import '../services/stealth_knock_service.dart';
+import '../services/dns_padding_service.dart';
+import '../services/outbound_dlp_service.dart';
+import '../services/threat_intel_service.dart';
+import '../services/har_export_service.dart';
+import '../services/sla_probe_service.dart';
+import '../models/abuse_ipdb_key.dart';
+import '../services/abuse_ipdb_service.dart';
+import '../models/sinkhole_log_entry.dart';
+import '../services/developer_cert_service.dart';
+import '../services/network_handover_service.dart';
+import '../services/speed_test_service.dart';
+import '../services/content_integrity_service.dart';
+import '../services/pool_warmup_service.dart';
+import '../models/shared_file_item.dart';
+import '../services/wifi_transfer_service.dart';
+import '../models/wifi_transfer_history_item.dart';
+import '../models/port_scan_result.dart';
+import '../services/port_scanner_service.dart';
+
+class ParsedProxyDto {
+  final String address;
+  final String? username;
+  final String? password;
+
+  ParsedProxyDto({required this.address, this.username, this.password});
+}
+
+class MonitorController extends ChangeNotifier {
+  final NetworkService _networkService = NetworkService();
+  final FileService _fileService = FileService();
+  final ProxyScraperService _scraperService = ProxyScraperService();
+  final GeoIpService _geoIpService = GeoIpService();
+  final ExportService _exportService = ExportService();
+  final LocalGatewayService _gatewayService = LocalGatewayService();
+  final SystemProxyService _systemProxyService = SystemProxyService();
+  final StorageService _storageService = StorageService();
+  final DatabaseService _dbService = DatabaseService();
+
+  final LocalSocks5Service _socks5Service = LocalSocks5Service();
+  // --- WI-FI FILE TRANSFER & STREAMING STATE ---
+  final WifiTransferService _wifiService = WifiTransferService();
+
+  // --- LIVE TRAFFIC INSPECTOR STATE ---
+  final List<GatewayTrafficEntry> liveTraffic = [];
+  static const int _maxTrafficHistory = 150;
+  String trafficFilterQuery = '';
+
+  final Map<String, int> _consecutiveFailures = {};
+
+  int totalCircuitBreakerTrips = 0;
+
+  // --- STEALTH & OBFUSCATION STATE ---
+  bool isStealthKnockEnabled = false;
+  String stealthKnockSecret = 'stealth_knock_7741';
+  bool isDnsPaddingEnabled = true;
+
+  // --- DLP & THREAT INTEL STATE ---
+  bool isDlpEnabled = true;
+  bool isThreatIntelEnabled = true;
+  bool isSyncingThreatIntel = false;
+
+  bool autoProbeSla = true;
+
+  // --- DEVELOPER HTTPS INSIGHT STATE ---
+  bool isHttpsInspectionEnabled = false;
+  bool isDevCertInstalled = false;
+
+  // Toggle for automated 256KB download speed testing (Defaults to FALSE to save bandwidth)
+  bool autoSpeedTest = false;
+
+  // --- CONTENT TAMPERING & AD-INJECTION STATE ---
+  bool autoAuditTampering = true;
+  bool excludeTamperedFromGateway = true;
+
+  bool isWarmingUp = false;
+
+  int wifiSubTabIndex = 0;
+  List<File> receivedFilesList = [];
+
+  final PortScannerService _portScanner = PortScannerService();
+  bool isPortScanning = false;
+  String portScanTargetHost = '';
+  List<PortScanResult> portScanResults = [];
+
+  bool get isWifiTransferRunning => _wifiService.isRunning;
+  String get wifiTransferUrl =>
+      'http://${_wifiService.localIpAddress}:${_wifiService.serverPort}';
+  List<SharedFileItem> get sharedFiles => _wifiService.sharedFiles;
+  List<WifiTransferHistoryItem> get wifiHistory => _wifiService.history;
+  ActiveTransferStatus? get activeWifiTransfer => _wifiService.currentTransfer;
+
+  // Settings
+  bool get allowWifiUploads => _wifiService.allowUploads;
+  bool get allowWifiDownloads => _wifiService.allowDownloads;
+  String get wifiReceiveDirectoryDisplay =>
+      _wifiService.customReceiveDirectoryPath.isEmpty
+      ? r'Default (Desktop\network_monitor)'
+      : _wifiService.customReceiveDirectoryPath;
+
+  void setWifiSubTab(int index) {
+    wifiSubTabIndex = index;
+    if (index == 1) {
+      refreshReceivedFiles();
+    }
+    notifyListeners();
+  }
+
+  void toggleAllowWifiUploads(bool value) {
+    _wifiService.allowUploads = value;
+    addLog(
+      value
+          ? '[Wi-Fi Settings] Client file uploads ALLOWED.'
+          : '[Wi-Fi Settings] Client file uploads DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void toggleAllowWifiDownloads(bool value) {
+    _wifiService.allowDownloads = value;
+    addLog(
+      value
+          ? '[Wi-Fi Settings] File downloads & streaming ALLOWED.'
+          : '[Wi-Fi Settings] Downloads DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  Future<void> pickCustomReceiveDirectory() async {
+    final result = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Select Folder for Received Files',
+    );
+    if (result != null && result.isNotEmpty) {
+      _wifiService.customReceiveDirectoryPath = result;
+      addLog('[Wi-Fi Settings] New receive directory: $result');
+      refreshReceivedFiles();
+      notifyListeners();
+    }
+  }
+
+  void resetDefaultReceiveDirectory() {
+    _wifiService.customReceiveDirectoryPath = '';
+    addLog(
+      '[Wi-Fi Settings] Reset receive directory to Desktop\\network_monitor.',
+    );
+    refreshReceivedFiles();
+    notifyListeners();
+  }
+
+  Future<void> refreshReceivedFiles() async {
+    receivedFilesList = await _wifiService.listReceivedFiles();
+    notifyListeners();
+  }
+
+  Future<void> deleteReceivedFile(File file) async {
+    try {
+      if (file.existsSync()) {
+        file.deleteSync();
+        addLog('Deleted received file: ${file.path.split("\\").last}');
+        refreshReceivedFiles();
+      }
+    } catch (e) {
+      addLog('Error deleting file: $e');
+    }
+  }
+
+  void clearWifiHistory() {
+    _wifiService.history.clear();
+    addLog('Cleared Wi-Fi transfer history.');
+    notifyListeners();
+  }
+
+  Future<void> openReceivedFolderInExplorer() async {
+    final dir = await _wifiService.getReceiveDirectory();
+    Process.start('explorer.exe', [dir.path]);
+  }
+
+  /// Starts or stops the Wi-Fi Share Server
+  /// Starts or stops the Wi-Fi Share Server with Real-Time UI Updates
+  Future<void> toggleWifiTransferServer() async {
+    if (isWifiTransferRunning) {
+      await _wifiService.stopServer();
+      addLog('Wi-Fi Share Server stopped.');
+    } else {
+      await _wifiService.startServer(
+        onLog: addLog,
+        // =====================================================================
+        // REAL-TIME AUTO-UPDATE: Re-scans disk folder & updates UI immediately!
+        // =====================================================================
+        onFilesUpdated: () async {
+          await refreshReceivedFiles(); // Refreshes received files automatically
+          notifyListeners(); // Updates history and active progress
+        },
+      );
+      // Pre-load received files immediately on server start
+      await refreshReceivedFiles();
+    }
+    notifyListeners();
+  }
+
+  // --- ADAPTER SELECTION FOR WI-FI SHARE ---
+  List<NetworkAdapterItem> get availableAdapters =>
+      _wifiService.availableAdapters;
+  String get selectedWifiIp => _wifiService.localIpAddress;
+
+  Future<void> refreshNetworkAdapters() async {
+    await _wifiService.loadAllAdapters();
+    notifyListeners();
+  }
+
+  void setSelectedWifiIp(String ip) {
+    _wifiService.setSelectedIp(ip);
+    addLog('Selected Wi-Fi Share IP: $ip');
+    notifyListeners();
+  }
+
+  /// Adds files to the share hub via Windows File Picker
+  Future<void> pickAndAddSharedFiles() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        dialogTitle: 'Select Files to Share over Wi-Fi',
+      );
+
+      if (result != null && result.files.isNotEmpty) {
+        for (var file in result.files) {
+          if (file.path != null) {
+            final f = File(file.path!);
+            if (f.existsSync()) {
+              final ext = file.extension?.toLowerCase() ?? '';
+              final isMedia = [
+                'mp4',
+                'mkv',
+                'webm',
+                'mp3',
+                'wav',
+                'ogg',
+                'avi',
+              ].contains(ext);
+
+              _wifiService.sharedFiles.add(
+                SharedFileItem(
+                  id: DateTime.now().microsecondsSinceEpoch.toString(),
+                  name: file.name,
+                  path: file.path!,
+                  sizeBytes: file.size,
+                  extension: ext,
+                  isMedia: isMedia,
+                ),
+              );
+            }
+          }
+        }
+        addLog(
+          'Shared ${_wifiService.sharedFiles.length} file(s) on Wi-Fi hub.',
+        );
+        notifyListeners();
+      }
+    } catch (e) {
+      addLog('Error picking files: $e');
+    }
+  }
+
+  /// Removes a file from the share hub
+  void removeSharedFile(String id) {
+    _wifiService.sharedFiles.removeWhere((f) => f.id == id);
+    notifyListeners();
+  }
+
+  /// Clears all shared files
+  void clearSharedFiles() {
+    _wifiService.sharedFiles.clear();
+    notifyListeners();
+  }
+
+  /// 1-Click: Warms up the top fastest active nodes to eliminate cold-start delays
+  Future<void> warmUpActivePool({int topCount = 10}) async {
+    if (isWarmingUp) return;
+
+    final activeNodes = _dbService.getActiveProxiesForGateway(
+      currentProfileName,
+    );
+    if (activeNodes.isEmpty) {
+      addLog(
+        'Cannot warm up pool: No active proxies found in current workspace.',
+      );
+      return;
+    }
+
+    isWarmingUp = true;
+    notifyListeners();
+
+    final targetNodes = activeNodes.take(topCount).toList();
+    addLog(
+      'Warming up top ${targetNodes.length} fastest active nodes (TCP Pre-Handshake)...',
+    );
+
+    final result = await PoolWarmupService.warmUpNodes(
+      targetNodes,
+      timeoutSeconds: 3,
+    );
+
+    // Persist freshly primed latencies into SQLite
+    for (final node in targetNodes) {
+      _dbService.updateProxyRecord(currentProfileName, node);
+    }
+    refreshStats();
+
+    isWarmingUp = false;
+    addLog(
+      '[Pool Warm-Up] Primed ${result.primedCount}/${targetNodes.length} nodes in ${result.elapsedTotalMs}ms. '
+      'Fastest: ${result.fastestLatencyMs ?? 0}ms. Sockets ready for instant browsing!',
+    );
+
+    notifyListeners();
+  }
+
+  void setAutoAuditTampering(bool enabled) {
+    autoAuditTampering = enabled;
+    _storageService.saveAutoAuditTampering(enabled);
+    addLog(
+      enabled
+          ? 'HTML Content Integrity & Ad-Injection audit ENABLED for scans.'
+          : 'Content Integrity audit DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void toggleExcludeTamperedFromGateway(bool enabled) {
+    excludeTamperedFromGateway = enabled;
+    _storageService.saveExcludeTamperedGateway(enabled);
+    addLog(
+      enabled
+          ? 'Gateway Anti-Tamper Filter ENABLED: Proxies that inject ads/scripts are blocked from routing.'
+          : 'Gateway Anti-Tamper Filter DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void setAutoSpeedTest(bool enabled) {
+    autoSpeedTest = enabled;
+    _storageService.saveAutoSpeedTest(enabled);
+    addLog(
+      enabled
+          ? 'Download Speed Benchmark (256KB) ENABLED for scans.'
+          : 'Speed Benchmark DISABLED (Bandwidth saved).',
+    );
+    notifyListeners();
+  }
+
+  Future<void> checkDevCertStatus() async {
+    isDevCertInstalled = await DeveloperCertService.isCertInstalledInWindows();
+    notifyListeners();
+  }
+
+  Future<void> toggleHttpsInspection(bool enabled) async {
+    if (enabled && !isDevCertInstalled) {
+      addLog(
+        'Cannot enable HTTPS Inspection: Local Root Certificate is not installed.',
+      );
+      return;
+    }
+    isHttpsInspectionEnabled = enabled;
+    _storageService.saveHttpsInspectionEnabled(enabled);
+    addLog(
+      enabled
+          ? '[DEV INSIGHT] HTTPS Decryption Mode ACTIVATED.'
+          : 'HTTPS Decryption Mode DISABLED.',
+    );
+    if (isGatewayRunning) {
+      toggleGateway().then((_) => toggleGateway()); // Restart to apply
+    }
+    notifyListeners();
+  }
+
+  Future<bool> installDevCertificate() async {
+    addLog(
+      'Installing developer root certificate into Windows (CurrentUser)...',
+    );
+    final success = await DeveloperCertService.installIntoWindowsTrustStore();
+    await checkDevCertStatus();
+    if (success) {
+      addLog('Developer root certificate installed and trusted.');
+    } else {
+      addLog('Certificate installation was canceled or failed.');
+    }
+    return success;
+  }
+
+  Future<bool> removeDevCertificate() async {
+    addLog('Removing developer root certificate from Windows...');
+    if (isHttpsInspectionEnabled) {
+      await toggleHttpsInspection(false);
+    }
+    final success = await DeveloperCertService.removeFromWindowsTrustStore();
+    await checkDevCertStatus();
+    addLog('Developer root certificate successfully removed from Windows.');
+    return success;
+  }
+
+  // --- SINKHOLE AUDIT LOG & WHITELIST STATE ---
+  List<SinkholeLogEntry> get sinkholeAuditLog =>
+      DomainShieldService().queryAuditLog;
+  Set<String> get whitelistedDomains =>
+      _dbService.getAllWhitelistedDomainsSet();
+  int get totalWhitelistedCount => _dbService.getWhitelistedDomainsCount();
+
+  /// Whitelists a domain so it is NEVER blocked (Overrides all blocklists)
+  void whitelistDomain(String domain) {
+    final clean = domain.trim().toLowerCase().replaceAll(
+      RegExp(r'^(https?:\/\/|socks5:\/\/)'),
+      '',
+    );
+    if (clean.isEmpty) return;
+
+    _dbService.addWhitelistedDomain(clean);
+    DomainShieldService().reloadCacheFromDb();
+    addLog('[Whitelist] Allowed domain: $clean. Shield will bypass it.');
+    notifyListeners();
+  }
+
+  /// Removes a domain from the whitelist
+  void removeWhitelistedDomain(String domain) {
+    _dbService.deleteWhitelistedDomain(domain);
+    DomainShieldService().reloadCacheFromDb();
+    addLog('[Whitelist] Removed domain: $domain.');
+    notifyListeners();
+  }
+
+  void clearSinkholeAuditLog() {
+    DomainShieldService().queryAuditLog.clear();
+    notifyListeners();
+  }
+
+  // --- ABUSEIPDB & SPAM DEFENSE STATE ---
+  List<AbuseIpdbKey> abuseKeys = [];
+  bool excludeSpamFromGateway = false;
+
+  void reloadAbuseKeys() {
+    abuseKeys = _dbService.getAllAbuseKeys();
+    notifyListeners();
+  }
+
+  void addAbuseKey(String apiKey, {String label = ''}) {
+    final newKey = AbuseIpdbKey(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      apiKey: apiKey.trim(),
+      label: label.trim(),
+      lastUsedDate: DateTime.now(),
+    );
+    _dbService.insertAbuseKey(newKey);
+    reloadAbuseKeys();
+    addLog('Added AbuseIPDB API key (${newKey.maskedKey}).');
+  }
+
+  void deleteAbuseKey(String id) {
+    _dbService.deleteAbuseKey(id);
+    reloadAbuseKeys();
+    addLog('Deleted AbuseIPDB API key.');
+  }
+
+  void toggleExcludeSpamFromGateway(bool enabled) {
+    excludeSpamFromGateway = enabled;
+    _storageService.saveExcludeSpamProxies(enabled);
+    addLog(
+      enabled
+          ? 'Spam-Exclusion ENABLED: Gateway will NEVER route through proxies with Abuse Score >= 20%.'
+          : 'Spam-Exclusion DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void setAutoProbeSla(bool enabled) {
+    autoProbeSla = enabled;
+    _storageService.saveAutoProbeSla(enabled);
+    addLog(
+      enabled
+          ? 'Multi-Region SLA & Jitter audit enabled for scans.'
+          : 'SLA audit disabled.',
+    );
+    notifyListeners();
+  }
+
+  int get totalDlpBlocked => OutboundDlpService().totalLeaksPrevented;
+  int get totalThreatsBlocked => ThreatIntelService().totalThreatsBlocked;
+  int get totalThreatCidrs => ThreatIntelService().totalCidrsLoaded;
+
+  // --- GEO-FENCING JURISDICTIONS STATE ---
+  Set<String> excludedCountries = {};
+
+  // --- UPSTREAM DNS RESOLVER STATE ---
+  DnsResolverPreset activeDnsPreset = DnsResolverPreset.cloudflare;
+  String customDohUrl = '';
+
+  void setDnsPreset(DnsResolverPreset preset, {String? customUrl}) {
+    activeDnsPreset = preset;
+    DnsResolverService().activePreset = preset;
+
+    if (customUrl != null) {
+      customDohUrl = customUrl.trim();
+      DnsResolverService().customDohUrl = customDohUrl;
+    }
+
+    _storageService.saveDnsResolverSettings(
+      preset: activeDnsPreset,
+      customUrl: customDohUrl,
+    );
+
+    DnsResolverService().clearDnsCache();
+    addLog('Upstream DNS Resolver set to: ${preset.label}');
+    notifyListeners();
+  }
+
+  Future<Map<String, dynamic>> testDnsResolver(String domain) async {
+    return await DnsResolverService().testResolution(domain);
+  }
+
+  String get databaseDiskSize => _dbService.getFormattedDiskSize();
+
+  /// 1-Click: Manually optimizes and shrinks the SQLite database
+  Future<void> optimizeDatabaseNow() async {
+    addLog('Optimizing and compacting SQLite database on disk...');
+    final bytesSaved = _dbService.compactDatabase(fullRebuild: true);
+    final kbSaved = (bytesSaved / 1024).toStringAsFixed(1);
+    addLog(
+      'Database optimized. Reclaimed $kbSaved KB disk space (Current size: $databaseDiskSize).',
+    );
+    notifyListeners();
+  }
+
+  void toggleExcludedCountry(String countryCode) {
+    if (excludedCountries.contains(countryCode)) {
+      excludedCountries.remove(countryCode);
+      addLog('Geo-Fence removed: Allowed traffic through $countryCode.');
+    } else {
+      excludedCountries.add(countryCode);
+      addLog(
+        '[Geo-Fence Active] Blacklisted jurisdiction: $countryCode. Gateway will never route through it.',
+      );
+    }
+    _storageService.saveExcludedCountries(excludedCountries.toList());
+    refreshStats();
+    notifyListeners();
+  }
+
+  void clearExcludedCountries() {
+    excludedCountries.clear();
+    _storageService.saveExcludedCountries([]);
+    addLog('Geo-Fence cleared: All countries allowed.');
+    refreshStats();
+    notifyListeners();
+  }
+
+  void toggleDlp(bool enabled) {
+    isDlpEnabled = enabled;
+    OutboundDlpService().isEnabled = enabled;
+    _saveDlpPreferences();
+    addLog(
+      enabled
+          ? 'Outbound DLP Secret Scanner ACTIVATED.'
+          : 'DLP Secret Scanner DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void toggleThreatIntel(bool enabled) {
+    isThreatIntelEnabled = enabled;
+    ThreatIntelService().isEnabled = enabled;
+    _saveDlpPreferences();
+    addLog(
+      enabled
+          ? 'Spamhaus / FireHOL Threat Intel Filter ACTIVATED.'
+          : 'Threat Intel Filter DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  Future<void> syncThreatIntel() async {
+    isSyncingThreatIntel = true;
+    notifyListeners();
+    addLog(
+      'Synchronizing live threat intelligence feeds (Spamhaus DROP / FireHOL)...',
+    );
+
+    try {
+      final count = await ThreatIntelService().syncThreatFeeds();
+      addLog(
+        'Threat intelligence updated: Loaded $count malicious CIDR subnets.',
+      );
+    } catch (e) {
+      addLog('Failed to sync threat intelligence: $e');
+    } finally {
+      isSyncingThreatIntel = false;
+      notifyListeners();
+    }
+  }
+
+  void _saveDlpPreferences() {
+    _storageService.saveDlpSettings(
+      dlp: isDlpEnabled,
+      threatIntel: isThreatIntelEnabled,
+    );
+  }
+
+  void toggleStealthKnock(bool enabled) {
+    isStealthKnockEnabled = enabled;
+    StealthKnockService().isEnabled = enabled;
+    _saveStealthSettings();
+    addLog(
+      enabled
+          ? 'Stealth Port Knocking ACTIVATED.'
+          : 'Stealth Port Knocking DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void setStealthSecret(String secret) {
+    stealthKnockSecret = secret.trim().isEmpty
+        ? 'stealth_knock_7741'
+        : secret.trim();
+    StealthKnockService().knockSecret = stealthKnockSecret;
+    _saveStealthSettings();
+    addLog('Stealth knock token updated.');
+    notifyListeners();
+  }
+
+  void toggleDnsPadding(bool enabled) {
+    isDnsPaddingEnabled = enabled;
+    DnsPaddingService.isEnabled = enabled;
+    _saveStealthSettings();
+    addLog(
+      enabled
+          ? 'RFC 7830 DNS Padding & Entropy ENABLED.'
+          : 'DNS Padding DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  /// 1-Click: Instantly unseals this PC's localhost
+  void authorizeLocalhostKnock() {
+    StealthKnockService().authorizeClient('127.0.0.1');
+    addLog(
+      'Localhost (127.0.0.1) unsealed for ${StealthKnockService().leaseMinutes} minutes.',
+    );
+    notifyListeners();
+  }
+
+  void _saveStealthSettings() {
+    _storageService.saveStealthSettings(
+      knockEnabled: isStealthKnockEnabled,
+      secret: stealthKnockSecret,
+      dnsPaddingEnabled: isDnsPaddingEnabled,
+    );
+  }
+
+  List<GatewayTrafficEntry> get filteredTraffic {
+    if (trafficFilterQuery.isEmpty) return liveTraffic;
+    return liveTraffic
+        .where(
+          (t) =>
+              t.host.toLowerCase().contains(trafficFilterQuery.toLowerCase()) ||
+              t.upstreamProxy.contains(trafficFilterQuery) ||
+              t.statusCode.toString().contains(trafficFilterQuery),
+        )
+        .toList();
+  }
+
+  /// Circuit Breaker: Called when an active proxy successfully handles a live request
+  void handleGatewayNodeSuccess(ProxyRecord proxy, int liveDurationMs) {
+    // 1. Reset consecutive failures
+    _consecutiveFailures[proxy.address] = 0;
+
+    // 2. Severe Latency Check (> 8000ms triggers circuit breaker)
+    if (liveDurationMs >= 8000) {
+      _tripCircuitBreaker(
+        proxy,
+        reason:
+            'Severe latency spike (${(liveDurationMs / 1000).toStringAsFixed(1)}s > 8s limit)',
+      );
+      return;
+    }
+
+    // 3. Smooth rolling latency update (60% historical + 40% live)
+    if (proxy.latencyMs != null && liveDurationMs > 0) {
+      proxy.latencyMs = ((proxy.latencyMs! * 0.6) + (liveDurationMs * 0.4))
+          .round();
+      _dbService.updateProxyRecord(currentProfileName, proxy);
+    }
+  }
+
+  /// Circuit Breaker: Called when a live request times out or is rejected
+  void handleGatewayNodeDropped(ProxyRecord proxy, int liveDurationMs) {
+    final fails = (_consecutiveFailures[proxy.address] ?? 0) + 1;
+    _consecutiveFailures[proxy.address] = fails;
+
+    // RULE: 2 consecutive failures OR request took > 8000ms before failing
+    if (fails >= 2 || liveDurationMs >= 8000) {
+      _tripCircuitBreaker(
+        proxy,
+        reason: fails >= 2
+            ? '2 consecutive live request failures'
+            : 'Timed out after 8s',
+      );
+    } else {
+      // First temporary hiccup: add penalty latency so faster nodes are prioritized first
+      proxy.latencyMs = (proxy.latencyMs ?? 1000) + 2000;
+      _dbService.updateProxyRecord(currentProfileName, proxy);
+      refreshStats();
+      notifyListeners();
+    }
+  }
+
+  /// Demotes node in SQLite, removes it from gateway rotation, and logs alert
+  void _tripCircuitBreaker(ProxyRecord proxy, {required String reason}) {
+    totalCircuitBreakerTrips++;
+    proxy.status = 'Failed (Circuit Breaker)';
+    _consecutiveFailures.remove(proxy.address);
+
+    // Update SQLite immediately so getActiveProxiesForGateway() stops returning this node
+    _dbService.updateProxyRecord(currentProfileName, proxy);
+    refreshStats();
+
+    addLog(
+      '[CIRCUIT BREAKER] Tripped on ${proxy.address}: $reason. Node auto-demoted to Failed.',
+    );
+    notifyListeners();
+    SystemTrayService().updateTrayMenu();
+  }
+
+  void recordTrafficEntry(GatewayTrafficEntry entry) {
+    liveTraffic.insert(0, entry);
+    while (liveTraffic.length > _maxTrafficHistory) {
+      liveTraffic.removeLast();
+    }
+    notifyListeners();
+  }
+
+  void clearTrafficLogs() {
+    liveTraffic.clear();
+    notifyListeners();
+  }
+
+  void setTrafficFilterQuery(String query) {
+    trafficFilterQuery = query.trim();
+    notifyListeners();
+  }
+
+  int socks5Port = 1080;
+
+  bool get isSocks5Running => _socks5Service.isRunning;
+  int get socks5RequestsCount => _socks5Service.totalRequestsForwarded;
+
+  // Cached pool statistics (Computed directly in SQL)
+  Map<String, dynamic> _poolStats = {};
+
+  List<ProxyRecord> get proxies => paginatedProxies;
+  List<String> logs = [];
+  bool isRunning = false;
+  bool isFetching = false;
+  bool isLooping = false;
+  double progress = 0.0;
+
+  bool usePacMode = false;
+
+  bool autoProbePlatforms = true;
+  int blocklistPage = 1;
+  int blocklistPageSize = 50;
+  String blocklistSearchQuery = '';
+  bool isSyncingBlocklist = false;
+
+  int get totalBlockedDomainsCount =>
+      _dbService.getBlockedDomainsCount(searchQuery: blocklistSearchQuery);
+  int get totalBlocklistPages =>
+      (totalBlockedDomainsCount / blocklistPageSize).ceil().clamp(1, 999999);
+
+  // Toggle for automated SSL/MitM & CT integrity audits during scans
+  bool autoAuditSsl = true;
+
+  void setAutoAuditSsl(bool enabled) {
+    autoAuditSsl = enabled;
+    _storageService.saveAutoAuditSsl(enabled);
+    addLog(
+      enabled
+          ? 'SSL/MitM & CT integrity audit enabled for scans.'
+          : 'SSL/MitM integrity audit disabled.',
+    );
+    notifyListeners();
+  }
+
+  // Toggle for automated ECH / SNI Privacy audits during scans
+  bool autoAuditEch = true;
+
+  void setAutoAuditEch(bool enabled) {
+    autoAuditEch = enabled;
+    _storageService.saveAutoAuditEch(enabled);
+    addLog(
+      enabled
+          ? 'ECH / SNI Privacy audit enabled for scans.'
+          : 'ECH audit disabled.',
+    );
+    notifyListeners();
+  }
+
+  List<String> get paginatedBlockedDomains {
+    return _dbService.getPaginatedBlockedDomains(
+      limit: blocklistPageSize,
+      offset: (blocklistPage - 1) * blocklistPageSize,
+      searchQuery: blocklistSearchQuery,
+    );
+  }
+
+  void setBlocklistPage(int p) {
+    blocklistPage = p.clamp(1, totalBlocklistPages);
+    notifyListeners();
+  }
+
+  void nextBlocklistPage() {
+    if (blocklistPage < totalBlocklistPages) {
+      blocklistPage++;
+      notifyListeners();
+    }
+  }
+
+  void prevBlocklistPage() {
+    if (blocklistPage > 1) {
+      blocklistPage--;
+      notifyListeners();
+    }
+  }
+
+  void setBlocklistSearch(String q) {
+    blocklistSearchQuery = q.trim();
+    blocklistPage = 1;
+    notifyListeners();
+  }
+
+  int concurrency = 4;
+  int timeoutSeconds = 5;
+  String targetUrl = 'https://www.example.com';
+  int gatewayPort = 8888;
+  GatewayRoutingMode gatewayMode = GatewayRoutingMode.fastest;
+
+  String? localPublicIp;
+  String? baselineDnsIp;
+
+  // --- PAGINATION STATE ---
+  int pageSize = 50;
+  int currentPage = 1;
+  String searchQuery = '';
+  String selectedFilter = 'All';
+  Set<String> selectedCountries = {};
+
+  // Sorting
+  String sortColumn = 'Default';
+  bool sortAscending = true;
+
+  // --- NETWORK PRIVACY & SECURITY DEFENSES ---
+  bool isKillSwitchEnabled = true;
+  bool isHttpsOnlyEnabled = false;
+  Ipv6AuditResult? ipv6AuditResult;
+  bool isTestingIpv6 = false;
+
+  AppAccentColor accentColor = AppAccentColor.indigo;
+  String currentProfileName = 'Default';
+  List<String> availableProfiles = ['Default'];
+  List<ProxySource> proxySources = [];
+
+  // Instant SQLite-backed getters
+  int get totalCount => _poolStats['total'] ?? 0;
+  int get activeCount => _poolStats['active'] ?? 0;
+  int get failedCount => _poolStats['failed'] ?? 0;
+  Map<String, dynamic> get poolStats => _poolStats;
+
+  static const int _maxLogEntries = 250;
+
+  // Multi-Hop Chaining State
+  bool isMultiHopEnabled = false;
+  String? multiHopExitCountry;
+
+  String? get currentChainInfo => _gatewayService.lastChainInfo;
+
+  int get totalFilteredCount => _dbService.getFilteredCount(
+    profileName: currentProfileName,
+    filter: selectedFilter,
+    searchQuery: searchQuery,
+    countries: selectedCountries,
+  );
+
+  int get totalPages => (totalFilteredCount / pageSize).ceil().clamp(1, 999999);
+
+  bool isSystemProxyActive = false;
+
+  bool get isGatewayRunning => _gatewayService.isRunning;
+  int get gatewayRequestsCount => _gatewayService.totalRequestsForwarded;
+  int get gatewayFailoverCount => _gatewayService.totalFailoversTriggered;
+
+  int stickyMinutes = 10;
+
+  // --- GATEWAY ACCESS CONTROL & SHIELD STATE ---
+  bool isGatewayAuthEnabled = false;
+  String gatewayUsername = 'admin';
+  String gatewayPassword = 'secure_token_123';
+  bool isDomainShieldEnabled = true;
+
+  int get totalShieldBlockedRequests =>
+      DomainShieldService().totalBlockedRequests;
+
+  // --- NETWORK ADAPTER HANDOVER STATE ---
+  String get activeAdapterName => NetworkHandoverService().primaryAdapterName;
+  int totalHandoverEvents = 0;
+
+  void _initNetworkHandoverListener() {
+    NetworkHandoverService().startMonitoring(
+      onAdapterChanged: (description) async {
+        totalHandoverEvents++;
+        addLog(
+          '[NETWORK HANDOVER] Network adapter change detected! Initiating auto-rebind...',
+        );
+
+        // 1. Flush dead/stale sockets on both gateways
+        _gatewayService.flushStaleSockets(addLog);
+        _socks5Service.flushStaleSockets(addLog);
+
+        // 2. Clear stale in-memory DNS cache
+        DnsResolverService().clearDnsCache();
+        addLog('[Network Handover] Upstream DNS cache cleared.');
+
+        // 3. Reset network baseline to reflect the new connection
+        localPublicIp = await _networkService.getPublicIp();
+        baselineDnsIp = await _networkService.getBaselineDnsIp();
+        if (localPublicIp != null) {
+          addLog('[Network Handover] New baseline IP: $localPublicIp');
+        }
+
+        // 4. If Windows proxy is active, re-broadcast WinINet refresh
+        if (isSystemProxyActive) {
+          if (usePacMode) {
+            await _systemProxyService.enablePacProxy(
+              'http://127.0.0.1:$gatewayPort/proxy.pac',
+            );
+          } else {
+            await _systemProxyService.enableSystemProxy(
+              '127.0.0.1:$gatewayPort',
+            );
+          }
+          addLog(
+            '[Network Handover] Windows WinINet routing table refreshed for new adapter.',
+          );
+        }
+
+        notifyListeners();
+      },
+    );
+  }
+
+  void setGatewayAuth({
+    required bool enabled,
+    required String user,
+    required String pass,
+  }) {
+    isGatewayAuthEnabled = enabled;
+    gatewayUsername = user.trim().isEmpty ? 'admin' : user.trim();
+    gatewayPassword = pass.trim().isEmpty ? 'token' : pass.trim();
+
+    _storageService.saveGatewayAuthSettings(
+      enabled: isGatewayAuthEnabled,
+      user: gatewayUsername,
+      pass: gatewayPassword,
+    );
+
+    addLog(
+      enabled
+          ? 'Gateway Token Authentication ENABLED ($gatewayUsername).'
+          : 'Gateway Authentication DISABLED.',
+    );
+    if (isGatewayRunning) {
+      toggleGateway().then((_) => toggleGateway()); // Restart gateway to apply
+    }
+    notifyListeners();
+  }
+
+  void toggleDomainShield(bool enabled) {
+    isDomainShieldEnabled = enabled;
+    DomainShieldService().isEnabled = enabled;
+    _storageService.saveDomainShieldEnabled(enabled);
+    addLog(
+      enabled
+          ? 'Malicious Domain & Ad Shield ACTIVATED.'
+          : 'Domain Shield DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  void addBlockedDomain(String domain) {
+    _dbService.addBlockedDomain(domain);
+    DomainShieldService().reloadCacheFromDb();
+    addLog('Added domain to blocklist: $domain');
+    notifyListeners();
+  }
+
+  void deleteBlockedDomain(String domain) {
+    _dbService.deleteBlockedDomain(domain);
+    DomainShieldService().reloadCacheFromDb();
+    addLog('Deleted domain from blocklist: $domain');
+    notifyListeners();
+  }
+
+  void clearAllBlockedDomains() {
+    _dbService.clearAllBlockedDomains();
+    _dbService.compactDatabase(fullRebuild: true);
+    DomainShieldService().reloadCacheFromDb();
+    blocklistPage = 1;
+    addLog('Cleared blocklist and reclaimed database disk space.');
+    notifyListeners();
+  }
+
+  void setAutoProbePlatforms(bool enabled) {
+    autoProbePlatforms = enabled;
+    _storageService.saveAutoPlatformProbe(enabled);
+    addLog(
+      enabled
+          ? 'Platform reachability audit enabled for scans.'
+          : 'Platform reachability audit disabled.',
+    );
+    notifyListeners();
+  }
+
+  void setStickyMinutes(int minutes) {
+    stickyMinutes = minutes;
+    _storageService.saveStickyMinutes(minutes);
+    notifyListeners();
+  }
+
+  void toggleKillSwitch(bool enabled) {
+    isKillSwitchEnabled = enabled;
+    _storageService.saveKillSwitch(enabled);
+    addLog(
+      enabled
+          ? 'Gateway Kill Switch ENABLED.'
+          : 'Gateway Kill Switch DISABLED.',
+    );
+    if (isGatewayRunning) {
+      toggleGateway().then(
+        (_) => toggleGateway(),
+      ); // Restart to apply PAC changes
+    }
+    notifyListeners();
+  }
+
+  void toggleHttpsOnly(bool enabled) {
+    isHttpsOnlyEnabled = enabled;
+    _storageService.saveHttpsOnly(enabled);
+    addLog(
+      enabled
+          ? 'HTTPS-Only mode ENABLED (Plaintext HTTP blocked).'
+          : 'HTTPS-Only mode DISABLED.',
+    );
+    notifyListeners();
+  }
+
+  /// Probes whether a proxy supports ECH (Encrypted Client Hello) without leaking SNI
+  Future<void> probeEchReadiness(ProxyRecord record) async {
+    addLog('Auditing ECH & SNI privacy for ${record.address}...');
+    final result = await EchInspectorService.checkEchReadiness(record);
+
+    record.isEchReady = result.isEchReady;
+    record.echDetails = result.details;
+
+    _dbService.updateProxyRecord(currentProfileName, record);
+    addLog(
+      '${record.address} ECH Status: ${result.isEchReady ? "READY (Encrypted SNI)" : "PLAINTEXT SNI"}',
+    );
+    notifyListeners();
+  }
+
+  /// Runs the IPv6 Leak Defense probe
+  Future<void> auditIpv6Leak() async {
+    isTestingIpv6 = true;
+    notifyListeners();
+    addLog('Auditing local network for IPv6 bypass leaks...');
+
+    ipv6AuditResult = await Ipv6DefenseService.testIpv6Leak();
+    isTestingIpv6 = false;
+
+    if (ipv6AuditResult!.isLeaking) {
+      addLog(
+        '[Security Warning] IPv6 Leak Detected: ${ipv6AuditResult!.ipv6Address}',
+      );
+    } else {
+      addLog('IPv6 audit clean: No IPv6 leaks detected.');
+    }
+    notifyListeners();
+  }
+
+  /// SQLite-driven pagination: Only loads 50 records into memory
+  List<ProxyRecord> get paginatedProxies {
+    return _dbService.getPaginatedProxies(
+      profileName: currentProfileName,
+      limit: pageSize,
+      offset: (currentPage - 1) * pageSize,
+      filter: selectedFilter,
+      searchQuery: searchQuery,
+      countries: selectedCountries,
+      sortColumn: sortColumn,
+      sortAscending: sortAscending,
+    );
+  }
+
+  ProfileData get _currentProfileData => ProfileData(
+    name: currentProfileName,
+    targetUrl: targetUrl,
+    timeoutSeconds: timeoutSeconds,
+    concurrency: concurrency,
+    gatewayPort: gatewayPort,
+    gatewayMode: gatewayMode,
+    proxies: const [], // Proxies live in SQLite
+  );
+
+  List<ProxyRecord> get filteredProxies => paginatedProxies;
+
+  Set<String> get availableCountries =>
+      _dbService.getCountryCounts(currentProfileName).keys.toSet();
+  Map<String, int> get countryCounts =>
+      _dbService.getCountryCounts(currentProfileName);
+
+  void refreshStats() {
+    // Calculates stats across all nodes in the active profile
+    _poolStats = _dbService.getPoolStatistics(currentProfileName);
+  }
+
+  MonitorController() {
+    loadPersistedSettings();
+  }
+
+  Future<void> addProxySource(String name, String url) async {
+    final newSource = ProxySource(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      name: name.trim(),
+      url: url.trim(),
+    );
+    proxySources.add(newSource);
+    await _storageService.saveProxySources(proxySources);
+    addLog('Added proxy source: ${newSource.name}');
+    notifyListeners();
+  }
+
+  /// Updates an existing proxy source
+  Future<void> updateProxySource(ProxySource updated) async {
+    final idx = proxySources.indexWhere((s) => s.id == updated.id);
+    if (idx != -1) {
+      proxySources[idx] = updated;
+      await _storageService.saveProxySources(proxySources);
+      notifyListeners();
+    }
+  }
+
+  /// Deletes a proxy source
+  Future<void> deleteProxySource(String id) async {
+    proxySources.removeWhere((s) => s.id == id);
+    await _storageService.saveProxySources(proxySources);
+    addLog('Deleted proxy source.');
+    notifyListeners();
+  }
+
+  /// Toggles whether a source is enabled or disabled
+  Future<void> toggleProxySource(String id, bool isEnabled) async {
+    final source = proxySources.firstWhere((s) => s.id == id);
+    source.isEnabled = isEnabled;
+    await _storageService.saveProxySources(proxySources);
+    notifyListeners();
+  }
+
+  /// Tests a single source URL and returns the number of proxies found
+  Future<int> testSingleSource(ProxySource source) async {
+    try {
+      final results = await _scraperService.testSource(source.url);
+      source.lastCount = results.length;
+      source.lastFetched = DateTime.now();
+      await _storageService.saveProxySources(proxySources);
+      notifyListeners();
+      return results.length;
+    } catch (e) {
+      source.lastCount = 0;
+      await _storageService.saveProxySources(proxySources);
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  /// Restores default recommended proxy sources
+  Future<void> resetDefaultSources() async {
+    await _storageService.saveProxySources([]); // store "[]"
+    proxySources = await _storageService
+        .getProxySources(); // now returns defaults
+    await _storageService.saveProxySources(proxySources); // persist them
+    addLog('Restored default proxy sources.');
+    notifyListeners();
+  }
+
+  /// Updated Fetch: Downloads from all ENABLED sources in the Source Manager
+  /// Downloads proxies from all enabled sources in the Proxy Source Manager
+  Future<void> fetchOnlineEndpoints() async {
+    if (isRunning || isFetching) return;
+
+    final activeSources = proxySources.where((s) => s.isEnabled).toList();
+    if (activeSources.isEmpty) {
+      addLog(
+        'No proxy sources are enabled. Open the Sources tab to enable feeds.',
+      );
+      return;
+    }
+
+    isFetching = true;
+    addLog('Fetching proxies from ${activeSources.length} enabled sources...');
+    notifyListeners();
+
+    try {
+      final results = await _scraperService.fetchFromSources(proxySources);
+      if (results.isNotEmpty) {
+        await importRawLines(
+          results,
+          sourceName: '${activeSources.length} Online Sources',
+        );
+        await _storageService.saveProxySources(proxySources);
+      } else {
+        addLog('No proxies were returned by the enabled sources.');
+      }
+    } catch (e) {
+      addLog('Error fetching from online sources: $e');
+    } finally {
+      isFetching = false;
+      notifyListeners();
+    }
+  }
+
+  /// Downloads and syncs an online blocklist feed
+  Future<int> syncOnlineBlocklist(String url) async {
+    isSyncingBlocklist = true;
+    notifyListeners();
+    addLog('Downloading blocklist feed from $url...');
+
+    try {
+      final domains = await DomainShieldService().fetchFromRemoteHostsUrl(url);
+      final inserted = _dbService.batchInsertBlockedDomains(domains);
+      DomainShieldService()
+          .reloadCacheFromDb(); // Refresh in-memory Gateway filter
+
+      addLog(
+        'Synced $inserted new unique domains into Blocklist. Total rules: $totalBlockedDomainsCount.',
+      );
+      isSyncingBlocklist = false;
+      notifyListeners();
+      return inserted;
+    } catch (e) {
+      isSyncingBlocklist = false;
+      addLog('Failed to sync blocklist: $e');
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  // Deduplication & Import Engine
+  Future<void> importRawLines(
+    List<String> lines, {
+    String sourceName = 'Source',
+  }) async {
+    if (lines.isEmpty) return;
+
+    addLog('Parsing ${lines.length} lines in background isolate...');
+
+    final List<ParsedProxyDto> parsed = await Isolate.run(() {
+      final List<ParsedProxyDto> results = [];
+      final seen = <String>{};
+
+      for (var rawLine in lines) {
+        var line = rawLine.trim();
+        if (line.isEmpty) continue;
+
+        line = line.replaceAll(
+          RegExp(r'^(http|https|socks4|socks5)://', caseSensitive: false),
+          '',
+        );
+        if (line.endsWith('/')) line = line.substring(0, line.length - 1);
+
+        String? user;
+        String? pass;
+        String address = '';
+
+        if (line.contains('@')) {
+          final parts = line.split('@');
+          final creds = parts[0].split(':');
+          if (creds.length == 2) {
+            user = creds[0];
+            pass = creds[1];
+          }
+          address = parts[1].trim();
+        } else {
+          final parts = line.split(':');
+          if (parts.length == 4) {
+            address = '${parts[0].trim()}:${parts[1].trim()}';
+            user = parts[2].trim();
+            pass = parts[3].trim();
+          } else if (parts.length == 2) {
+            address = line.trim();
+          }
+        }
+
+        if (address.isNotEmpty && address.contains(':')) {
+          final key = '${address.toLowerCase()}:${user ?? ""}';
+          if (!seen.contains(key)) {
+            seen.add(key);
+            results.add(
+              ParsedProxyDto(address: address, username: user, password: pass),
+            );
+          }
+        }
+      }
+      return results;
+    });
+
+    final newRecords = parsed
+        .map(
+          (p) => ProxyRecord(
+            address: p.address,
+            username: p.username,
+            password: p.password,
+          ),
+        )
+        .toList();
+
+    // High-speed SQLite transaction insert
+    final inserted = _dbService.batchInsertProxies(
+      currentProfileName,
+      newRecords,
+    );
+    refreshStats();
+    addLog('Stored $inserted new unique nodes into SQLite from $sourceName.');
+    currentPage = 1;
+    notifyListeners();
+  }
+
+  void setGatewayPort(int port) {
+    gatewayPort = port;
+    saveCurrentProfile();
+    notifyListeners();
+  }
+
+  void setGatewayMode(GatewayRoutingMode mode) {
+    gatewayMode = mode;
+    saveCurrentProfile();
+    notifyListeners();
+  }
+
+  /// Toggles the local HTTP/HTTPS gateway on 127.0.0.1:[gatewayPort]
+  /// Toggles the Dual Gateway (HTTP on 8888 & SOCKS5 on 1080)
+  Future<void> toggleGateway() async {
+    if (isGatewayRunning || isSocks5Running) {
+      if (isSystemProxyActive) await toggleSystemProxy();
+      await _gatewayService.stopServer();
+      await _socks5Service.stopServer(); // Stop SOCKS5
+      addLog('Local gateway & SOCKS5 bridge stopped.');
+    } else {
+      final activeNodes = _dbService.getActiveProxiesForGateway(
+        currentProfileName,
+      );
+      if (activeNodes.isEmpty) {
+        addLog(
+          'Cannot start gateway: 0 active proxies found in SQLite database.',
+        );
+        return;
+      }
+
+      addLog(
+        'Gateway loaded ${activeNodes.length} active proxies from SQLite.',
+      );
+
+      // 1. Start HTTP / HTTPS Gateway on 8888
+      // 1. Start HTTP Gateway with Geo-Fence active
+      await _gatewayService.startServer(
+        port: gatewayPort,
+        getActiveProxies: () => _dbService.getActiveProxiesForGateway(
+          currentProfileName,
+          excludedCountries: excludedCountries.toList(),
+          excludeSpam: excludeSpamFromGateway,
+          excludeTampered: excludeTamperedFromGateway,
+        ),
+
+        mode: gatewayMode,
+        stickyMinutes: stickyMinutes,
+        isMultiHop: isMultiHopEnabled,
+        exitCountry: multiHopExitCountry,
+        killSwitch: isKillSwitchEnabled,
+        httpsOnly: isHttpsOnlyEnabled,
+        requireAuth: isGatewayAuthEnabled,
+        username: gatewayUsername,
+        password: gatewayPassword,
+        enableShield: isDomainShieldEnabled,
+        enableHttpsInspection: isHttpsInspectionEnabled,
+        onLog: addLog,
+        onNodeDropped: (droppedNode, duration) {
+          droppedNode.latencyMs = (droppedNode.latencyMs ?? 1000) + 2500;
+          _dbService.updateProxyRecord(currentProfileName, droppedNode);
+          refreshStats();
+          notifyListeners();
+        },
+        onNodeSuccess: handleGatewayNodeSuccess,
+        onTraffic: recordTrafficEntry,
+      );
+
+      // 2. Start SOCKS5 Gateway with Geo-Fence active
+      await _socks5Service.startServer(
+        port: socks5Port,
+        getActiveProxies: () => _dbService.getActiveProxiesForGateway(
+          currentProfileName,
+          excludedCountries: excludedCountries.toList(),
+        ),
+        onLog: addLog,
+        onNodeDropped: (droppedNode) {
+          droppedNode.latencyMs = (droppedNode.latencyMs ?? 1000) + 2500;
+          _dbService.updateProxyRecord(currentProfileName, droppedNode);
+          refreshStats();
+          notifyListeners();
+        },
+        onTraffic: recordTrafficEntry,
+        killSwitch: isKillSwitchEnabled,
+        enableShield: isDomainShieldEnabled,
+      );
+    }
+    notifyListeners();
+    SystemTrayService().updateTrayMenu();
+  }
+
+  void toggleMultiHop(bool enabled) {
+    isMultiHopEnabled = enabled;
+    _storageService.saveMultiHopEnabled(enabled);
+    if (isGatewayRunning) {
+      // Restart gateway to apply chaining rules
+      toggleGateway().then((_) => toggleGateway());
+    }
+    notifyListeners();
+  }
+
+  void setMultiHopExitCountry(String? countryCode) {
+    multiHopExitCountry = countryCode;
+    _storageService.saveMultiHopExitCountry(countryCode);
+    notifyListeners();
+  }
+
+  /// Toggles Windows System Proxy
+  void setUsePacMode(bool value) {
+    usePacMode = value;
+    notifyListeners();
+  }
+
+  /// Toggles Windows System Proxy (Uses PAC or Global based on usePacMode)
+  Future<void> toggleSystemProxy() async {
+    if (isSystemProxyActive) {
+      final ok = await _systemProxyService.disableSystemProxy();
+      if (ok) {
+        isSystemProxyActive = false;
+        addLog('Windows System Proxy disabled.');
+      }
+    } else {
+      if (!isGatewayRunning) {
+        addLog(
+          'Start the Local Gateway before activating Windows System Proxy.',
+        );
+        return;
+      }
+
+      bool ok = false;
+      if (usePacMode) {
+        // Smart PAC Mode
+        final pacUrl = 'http://127.0.0.1:$gatewayPort/proxy.pac';
+        ok = await _systemProxyService.enablePacProxy(pacUrl);
+        if (ok) {
+          isSystemProxyActive = true;
+          addLog(
+            'Windows Proxy active via Smart PAC Script ($pacUrl). Intranet and Banking bypassed.',
+          );
+        }
+      } else {
+        // Global Tunnel Mode
+        ok = await _systemProxyService.enableSystemProxy(
+          '127.0.0.1:$gatewayPort',
+        );
+        if (ok) {
+          isSystemProxyActive = true;
+          addLog(
+            'Windows Proxy active via Global Tunnel (127.0.0.1:$gatewayPort).',
+          );
+        }
+      }
+    }
+    notifyListeners();
+    SystemTrayService().updateTrayMenu();
+  }
+
+  // Clipboard: Paste endpoints
+  Future<void> pasteFromClipboard() async {
+    if (isRunning) return;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data != null && data.text != null && data.text!.isNotEmpty) {
+      final lines = data.text!.split(RegExp(r'[\r\n]+'));
+      importRawLines(lines, sourceName: 'Clipboard');
+    } else {
+      addLog('Clipboard is empty or does not contain text.');
+    }
+  }
+
+  // Clipboard: Copy active endpoints
+  Future<void> copyActiveToClipboard() async {
+    final activeNodes = _dbService.getActiveProxiesForGateway(
+      currentProfileName,
+    );
+    if (activeNodes.isEmpty) {
+      addLog('No active endpoints to copy.');
+      return;
+    }
+
+    final activeList = activeNodes.map((p) => p.address).join('\n');
+    await Clipboard.setData(ClipboardData(text: activeList));
+    addLog('Copied ${activeNodes.length} active endpoints to clipboard.');
+  }
+
+  // Sorting Handler
+  void setSort(String column) {
+    if (sortColumn == column) {
+      sortAscending = !sortAscending;
+    } else {
+      sortColumn = column;
+      sortAscending = true;
+    }
+    notifyListeners();
+  }
+
+  void toggleCountryFilter(String code) {
+    if (selectedCountries.contains(code)) {
+      selectedCountries.remove(code);
+    } else {
+      selectedCountries.add(code);
+    }
+    currentPage = 1;
+    notifyListeners();
+  }
+
+  void clearCountryFilters() {
+    selectedCountries.clear();
+    notifyListeners();
+  }
+
+  /// Re-test a single endpoint immediately
+  Future<void> retestSingleProxy(ProxyRecord record) async {
+    record.status = 'Testing...';
+    notifyListeners();
+
+    final result = await _networkService.runDiagnosticInIsolate(
+      address: record.address,
+      username: record.username,
+      password: record.password,
+      realClientIp: localPublicIp,
+      baselineDnsIp: baselineDnsIp,
+      timeoutSeconds: timeoutSeconds,
+    );
+
+    record.status = result.status;
+    record.latencyMs = result.latencyMs;
+    record.tcpPingMs = result.tcpPingMs;
+    record.protocol = result.protocol;
+    record.anonymity = result.anonymity;
+    record.sslSupported = result.sslSupported;
+    record.isDnsLeaked = result.isDnsLeaked;
+    record.dnsServerIp = result.dnsServerIp;
+
+    if (record.status == 'Active') {
+      // 1. GeoIP Lookup (Borrow active proxy from SQLite if rate-limited)
+      final host = record.address.split(':')[0];
+      final geo = await _geoIpService.lookupCountry(
+        host,
+        getActiveProxies: () =>
+            _dbService.getActiveProxiesForGateway(currentProfileName),
+        onLog: addLog,
+      );
+      if (geo != null) {
+        record.country = geo['country'];
+        record.countryCode = geo['countryCode'];
+        record.isp = geo['isp'];
+      }
+
+      final abuseResult = await AbuseIpdbService().checkIpAbuse(
+        host,
+        onLog: addLog,
+        onKeyUpdated: reloadAbuseKeys,
+      );
+      if (abuseResult != null) {
+        record.abuseScore = abuseResult.abuseScore;
+        record.totalAbuseReports = abuseResult.totalReports;
+        record.ipUsageType = abuseResult.usageType;
+      }
+
+      // 2. Automated SSL/MitM & Certificate Transparency Audit
+      if (autoAuditSsl) {
+        final sslResult = await SslIntegrityService.checkCertificateIntegrity(
+          record,
+          timeoutSeconds: 3,
+        );
+        record.isMitmDetected = sslResult.isMitmDetected;
+        record.sslCertificateIssuer = sslResult.issuer;
+        record.isCtCompliant = sslResult.isCtCompliant;
+        record.sctCount = sslResult.sctCount;
+      }
+
+      // 3. Automated Platform Reachability (Google, Cloudflare, Wikipedia, GitHub)
+      if (autoProbePlatforms) {
+        final reachability = await PlatformProbeService.probePlatforms(
+          record,
+          timeoutSeconds: 3,
+        );
+        record.platformReachability = reachability;
+      }
+
+      // 4. Automated ECH / SNI Privacy Audit
+      if (autoAuditEch) {
+        final echResult = await EchInspectorService.checkEchReadiness(
+          record,
+          timeoutSeconds: 3,
+        );
+        record.isEchReady = echResult.isEchReady;
+        record.echDetails = echResult.details;
+      }
+      if (autoProbeSla && record.status == 'Active') {
+        final slaResult = await SlaProbeService.auditRegionalSla(
+          record,
+          timeoutSeconds: 3,
+        );
+        record.jitterMs = slaResult.jitterMs;
+        record.slaScore = slaResult.slaScore;
+        record.regionalLatencies = slaResult.regionalLatencies;
+      }
+
+      if (autoSpeedTest && record.status == 'Active') {
+        final speed = await SpeedTestService.measureDownloadSpeed(
+          record,
+          timeoutSeconds: 5,
+        );
+        record.downloadSpeedBps = speed;
+      }
+      if (autoAuditTampering) {
+        final tamperResult =
+            await ContentIntegrityService.auditContentIntegrity(
+              record,
+              timeoutSeconds: 3,
+            );
+        record.isContentTampered = tamperResult.isTampered;
+        record.tamperDetails = tamperResult.details;
+      }
+    }
+
+    // =========================================================================
+    // CRITICAL: Save to SQLite database and refresh dashboard stats!
+    // =========================================================================
+    _dbService.updateProxyRecord(currentProfileName, record);
+    refreshStats();
+
+    addLog(
+      'Retested ${record.address}: ${record.status} (${record.latencyMs ?? 0}ms)',
+    );
+
+    notifyListeners();
+  }
+
+  /// Remove a single endpoint from the list
+  void deleteProxy(ProxyRecord record) {
+    _dbService.deleteSingleProxy(currentProfileName, record);
+    refreshStats();
+    addLog('Removed ${record.address} from endpoint list.');
+    notifyListeners();
+  }
+
+  // Multi-Format Export
+  Future<void> exportResults(ExportFormat format) async {
+    final toExport = _dbService.getActiveProxiesForGateway(currentProfileName);
+    if (toExport.isEmpty) {
+      addLog('No active endpoints to export.');
+      return;
+    }
+
+    final success = await _exportService.exportData(toExport, format);
+    if (success) {
+      addLog(
+        'Exported ${toExport.length} items as ${format.name.toUpperCase()}.',
+      );
+    }
+  }
+
+  // File Loader with Deduplication
+  Future<void> loadEndpoints() async {
+    try {
+      final lines = await _fileService.pickAndReadLines();
+      if (lines.isNotEmpty) {
+        importRawLines(lines, sourceName: 'File');
+      }
+    } catch (e) {
+      addLog('Error reading file: $e');
+    }
+  }
+
+  Future<void> saveCurrentProfile() async {
+    await _storageService.saveProfile(_currentProfileData);
+  }
+
+  void setAccentColor(AppAccentColor newColor) {
+    accentColor = newColor;
+    _storageService.saveAccentColor(newColor);
+    notifyListeners();
+  }
+
+  Future<void> loadPersistedSettings() async {
+    // 1. Initialize SQLite
+    await _dbService.init();
+
+    _wifiService.loadAllAdapters();
+
+    // Load saved DNS resolver settings on startup:
+    final dnsData = await _storageService.getDnsResolverSettings();
+    activeDnsPreset = dnsData['preset'] as DnsResolverPreset;
+    customDohUrl = dnsData['customUrl'] as String;
+    DnsResolverService().activePreset = activeDnsPreset;
+    DnsResolverService().customDohUrl = customDohUrl;
+
+    autoProbeSla = await _storageService.getAutoProbeSla(defaultValue: true);
+    isHttpsInspectionEnabled = await _storageService
+        .getHttpsInspectionEnabled();
+    await checkDevCertStatus();
+
+    // Load AbuseIPDB Keys & Gateway Spam Exclusion Rule
+    reloadAbuseKeys();
+    excludeSpamFromGateway = await _storageService.getExcludeSpamProxies(
+      defaultValue: false,
+    );
+
+    // Load Geo-fenced countries
+    final savedExcluded = await _storageService.getExcludedCountries();
+    excludedCountries = savedExcluded.toSet();
+
+    // Load DLP & Threat Intel settings
+    final dlpPrefs = await _storageService.getDlpSettings();
+    isDlpEnabled = dlpPrefs['dlp']!;
+    isThreatIntelEnabled = dlpPrefs['threatIntel']!;
+    OutboundDlpService().isEnabled = isDlpEnabled;
+    ThreatIntelService().isEnabled = isThreatIntelEnabled;
+
+    // Auto-sync Threat Intel in background if not loaded
+    if (ThreatIntelService().totalCidrsLoaded == 0) {
+      syncThreatIntel().catchError((_) {});
+    }
+
+    stickyMinutes = await _storageService.getStickyMinutes();
+    final authData = await _storageService.getGatewayAuthSettings();
+    isGatewayAuthEnabled = authData['enabled'] as bool;
+    gatewayUsername = authData['user'] as String;
+    gatewayPassword = authData['pass'] as String;
+
+    autoAuditSsl = await _storageService.getAutoAuditSsl(defaultValue: true);
+    autoAuditEch = await _storageService.getAutoAuditEch(defaultValue: true);
+
+    isDomainShieldEnabled = await _storageService.getDomainShieldEnabled();
+    DomainShieldService().isEnabled = isDomainShieldEnabled;
+
+    DomainShieldService().reloadCacheFromDb();
+
+    // Load saved stealth settings on startup:
+    final stealth = await _storageService.getStealthSettings();
+    isStealthKnockEnabled = stealth['knockEnabled'] as bool;
+    stealthKnockSecret = stealth['secret'] as String;
+    isDnsPaddingEnabled = stealth['dnsPaddingEnabled'] as bool;
+
+    StealthKnockService().isEnabled = isStealthKnockEnabled;
+    StealthKnockService().knockSecret = stealthKnockSecret;
+    DnsPaddingService.isEnabled = isDnsPaddingEnabled;
+
+    autoSpeedTest = await _storageService.getAutoSpeedTest(defaultValue: false);
+
+    autoAuditTampering = await _storageService.getAutoAuditTampering(
+      defaultValue: true,
+    );
+    excludeTamperedFromGateway = await _storageService
+        .getExcludeTamperedGateway(defaultValue: true);
+
+    if (_dbService.getBlockedDomainsCount() == 0) {
+      addLog(
+        '[Domain Shield] First-time setup: Auto-downloading recommended blocklist in background...',
+      );
+      // Runs asynchronously without blocking UI
+      syncOnlineBlocklist(DomainShieldService.defaultFeeds.first.url)
+          .catchError((_) => 0);
+    }
+
+    // Load saved privacy preferences on startup:
+    isKillSwitchEnabled = await _storageService.getKillSwitch(
+      defaultValue: true,
+    );
+    isHttpsOnlyEnabled = await _storageService.getHttpsOnly(
+      defaultValue: false,
+    );
+
+    isMultiHopEnabled = await _storageService.getMultiHopEnabled();
+    multiHopExitCountry = await _storageService.getMultiHopExitCountry();
+    autoProbePlatforms = await _storageService.getAutoPlatformProbe(
+      defaultValue: true,
+    );
+    accentColor = await _storageService.getAccentColor();
+
+    final recovered = await _systemProxyService.checkAndRecoverOrphanedProxy(
+      gatewayPort: gatewayPort,
+    );
+    if (recovered) {
+      isSystemProxyActive = false;
+      addLog('[Safety Guard] Restored direct internet connection.');
+    }
+
+    proxySources = await _storageService.getProxySources();
+    availableProfiles = await _storageService.getProfileNames();
+    currentProfileName = await _storageService.getActiveProfileName();
+
+    final profile =
+        await _storageService.loadProfile(currentProfileName) ??
+        await _storageService.loadProfile('Default');
+
+    if (profile != null) {
+      currentProfileName = profile.name;
+      targetUrl = profile.targetUrl;
+      timeoutSeconds = profile.timeoutSeconds;
+      concurrency = profile.concurrency;
+      gatewayPort = profile.gatewayPort;
+      gatewayMode = profile.gatewayMode;
+
+      // Migrate existing proxies into SQLite if any exist
+      if (profile.proxies.isNotEmpty) {
+        _dbService.batchInsertProxies(currentProfileName, profile.proxies);
+      }
+    }
+
+    _initNetworkHandoverListener();
+
+    refreshStats();
+    refreshReceivedFiles();
+    addLog(
+      'SQLite ready for "$currentProfileName": $totalCount total ($activeCount Active, $failedCount Failed).',
+    );
+    notifyListeners();
+  }
+
+  Future<void> probeContentIntegrity(ProxyRecord record) async {
+    addLog(
+      'Auditing HTML content integrity for ${record.address} (http://example.com)...',
+    );
+    final result = await ContentIntegrityService.auditContentIntegrity(record);
+
+    record.isContentTampered = result.isTampered;
+    record.tamperDetails = result.details;
+
+    _dbService.updateProxyRecord(currentProfileName, record);
+    refreshStats();
+
+    if (result.isTampered) {
+      addLog('[SECURITY ALERT] ${record.address} TAMPERED: ${result.details}');
+    } else {
+      addLog('${record.address} Content Clean: Authentic HTML verified.');
+    }
+    notifyListeners();
+  }
+
+  Future<void> probeSingleNodeSla(ProxyRecord record) async {
+    addLog(
+      'Auditing Multi-Region SLA & Jitter for ${record.address} (US, EU, Asia)...',
+    );
+    final result = await SlaProbeService.auditRegionalSla(record);
+
+    record.jitterMs = result.jitterMs;
+    record.slaScore = result.slaScore;
+    record.regionalLatencies = result.regionalLatencies;
+
+    _dbService.updateProxyRecord(currentProfileName, record);
+    addLog(
+      '${record.address} SLA Stability Score: ${result.slaScore}% (Jitter: ±${result.jitterMs}ms).',
+    );
+    notifyListeners();
+  }
+
+  /// Switches to another workspace
+  Future<void> switchProfile(String profileName) async {
+    if (isRunning) return;
+    if (profileName == currentProfileName) return;
+
+    currentProfileName = profileName;
+    await _storageService.setActiveProfileName(currentProfileName);
+    currentPage = 1;
+    refreshStats();
+    addLog('Switched to workspace "$currentProfileName".');
+    SystemTrayService().updateTrayMenu();
+    notifyListeners();
+  }
+
+  /// Creates a new workspace (clean or cloned)
+  Future<void> createProfile(
+    String newName, {
+    bool cloneCurrent = false,
+  }) async {
+    final trimmed = newName.trim();
+    if (trimmed.isEmpty || availableProfiles.contains(trimmed)) return;
+
+    // Save current workspace first
+    await saveCurrentProfile();
+
+    final newProfile = ProfileData(
+      name: trimmed,
+      targetUrl: cloneCurrent ? targetUrl : 'https://www.example.com',
+      timeoutSeconds: cloneCurrent ? timeoutSeconds : 5,
+      concurrency: cloneCurrent ? concurrency : 4,
+      gatewayPort: cloneCurrent ? gatewayPort : 8888,
+      gatewayMode: cloneCurrent ? gatewayMode : GatewayRoutingMode.fastest,
+      proxies: cloneCurrent ? List<ProxyRecord>.from(proxies) : [],
+    );
+
+    await _storageService.saveProfile(newProfile);
+    availableProfiles = await _storageService.getProfileNames();
+    await switchProfile(trimmed);
+  }
+
+  /// Renames the current workspace
+  Future<void> renameCurrentProfile(String newName) async {
+    final trimmed = newName.trim();
+    if (trimmed.isEmpty ||
+        trimmed == currentProfileName ||
+        availableProfiles.contains(trimmed)) {
+      return;
+    }
+
+    final oldName = currentProfileName;
+    await _storageService.renameProfile(oldName, trimmed);
+    currentProfileName = trimmed;
+    availableProfiles = await _storageService.getProfileNames();
+    addLog('Renamed workspace "$oldName" to "$trimmed".');
+    notifyListeners();
+  }
+
+  /// Deletes a workspace
+  Future<void> deleteCurrentProfile() async {
+    if (availableProfiles.length <= 1) {
+      addLog('Cannot delete the last remaining workspace.');
+      return;
+    }
+
+    final toDelete = currentProfileName;
+    availableProfiles.remove(toDelete);
+    await _storageService.deleteProfile(toDelete);
+
+    // Switch to first remaining profile
+    final nextProfile = availableProfiles.first;
+    await switchProfile(nextProfile);
+    addLog('Deleted workspace "$toDelete". Switched to "$nextProfile".');
+  }
+
+  /// 1-Click: Removes all duplicate proxies directly from SQLite
+  Future<void> removeDuplicates() async {
+    if (isRunning) return;
+
+    final removed = _dbService.removeDuplicates(currentProfileName);
+    if (removed > 0) {
+      _dbService.compactDatabase(); // Reclaim space
+      refreshStats();
+      currentPage = 1;
+      addLog(
+        'Removed $removed duplicate proxies and compacted SQLite database.',
+      );
+      SystemTrayService().updateTrayMenu();
+      notifyListeners();
+    } else {
+      addLog('No duplicate proxies found in current workspace.');
+    }
+  }
+
+  // Diagnostic Runner, Clear, and Controls
+  void setConcurrency(int val) {
+    concurrency = val;
+    saveCurrentProfile();
+    notifyListeners();
+  }
+
+  void setPage(int page) {
+    currentPage = page.clamp(1, totalPages);
+    notifyListeners();
+  }
+
+  void nextPage() {
+    if (currentPage < totalPages) {
+      currentPage++;
+      notifyListeners();
+    }
+  }
+
+  void previousPage() {
+    if (currentPage > 1) {
+      currentPage--;
+      notifyListeners();
+    }
+  }
+
+  void setSearchQuery(String q) {
+    searchQuery = q;
+    currentPage = 1;
+    notifyListeners();
+  }
+
+  void setSelectedFilter(String f) {
+    selectedFilter = f;
+    currentPage = 1;
+    notifyListeners();
+  }
+
+  void setTargetUrl(String url) {
+    var formattedUrl = url.trim();
+    if (!formattedUrl.startsWith('http://') &&
+        !formattedUrl.startsWith('https://')) {
+      formattedUrl = 'https://$formattedUrl';
+    }
+    targetUrl = formattedUrl;
+    saveCurrentProfile();
+    addLog('Target URL updated: $targetUrl');
+    notifyListeners();
+  }
+
+  void setTimeoutSeconds(int sec) {
+    timeoutSeconds = sec;
+    saveCurrentProfile();
+    addLog('Connection timeout set to: ${timeoutSeconds}s');
+    notifyListeners();
+  }
+
+  void addLog(String message) {
+    final timestamp = DateTime.now().toIso8601String().substring(11, 19);
+    logs.insert(0, '[$timestamp] $message');
+
+    // Prevent logs array from growing indefinitely
+    while (logs.length > _maxLogEntries) {
+      logs.removeLast();
+    }
+    notifyListeners();
+  }
+
+  void clearAll() {
+    if (isRunning) return;
+    _dbService.clearProfileProxies(currentProfileName);
+    logs.clear();
+    progress = 0.0;
+    refreshStats();
+    notifyListeners();
+  }
+
+  void toggleContinuousRun() {
+    isLooping = !isLooping;
+    if (isLooping) {
+      addLog('Continuous monitoring enabled.');
+      _runLoop();
+    } else {
+      addLog('Continuous monitoring disabled.');
+    }
+    notifyListeners();
+  }
+
+  Future<void> _runLoop() async {
+    while (isLooping) {
+      if (!isRunning && totalCount > 0) {
+        // <--- Changed from proxies.isNotEmpty to totalCount > 0
+        await runDiagnostics(concurrency: concurrency);
+      }
+      await Future.delayed(const Duration(seconds: 30));
+    }
+  }
+
+  Future<void> runDiagnostics({int concurrency = 4}) async {
+    if (isRunning) return;
+
+    // Fetch candidate proxies from SQLite (skipping Failed)
+    final queue = _dbService.getProxiesToTest(currentProfileName);
+
+    if (queue.isEmpty) {
+      addLog(
+        'All nodes are marked as Failed ($failedCount skipped). Right-click a node to retest.',
+      );
+      return;
+    }
+
+    final int targetCount = queue.length;
+    final int skippedCount = totalCount - targetCount;
+
+    isRunning = true;
+    progress = 0.0;
+    addLog(
+      'Starting test on $targetCount nodes ($skippedCount failed skipped)...',
+    );
+    notifyListeners();
+
+    if (localPublicIp == null) {
+      addLog('Analyzing local network baseline...');
+      localPublicIp = await _networkService.getPublicIp();
+      baselineDnsIp = await _networkService.getBaselineDnsIp();
+    }
+
+    int completed = 0;
+    int queueIndex = 0;
+    DateTime lastUiUpdate = DateTime.now();
+
+    Future<void> worker() async {
+      while (queueIndex < queue.length && isRunning) {
+        final record = queue[queueIndex++];
+
+        try {
+          final result = await _networkService.runDiagnosticInIsolate(
+            address: record.address,
+            username: record.username,
+            password: record.password,
+            realClientIp: localPublicIp,
+            baselineDnsIp: baselineDnsIp,
+            timeoutSeconds: timeoutSeconds,
+          );
+
+          record.status = result.status;
+          record.latencyMs = result.latencyMs;
+          record.tcpPingMs = result.tcpPingMs;
+          record.protocol = result.protocol;
+          record.anonymity = result.anonymity;
+          record.sslSupported = result.sslSupported;
+          record.isDnsLeaked = result.isDnsLeaked;
+          record.dnsServerIp = result.dnsServerIp;
+
+          record.isMitmDetected = result.isMitmDetected;
+          record.sslCertificateIssuer = result.sslCertificateIssuer;
+
+          if (record.isMitmDetected) {
+            addLog(
+              '[THREAT ALERT] Proxy ${record.address} is intercepting SSL traffic (${record.sslCertificateIssuer}). Node blocked.',
+            );
+          }
+
+          if (record.status == 'Active') {
+            final host = record.address.split(':')[0];
+            final geo = await _geoIpService.lookupCountry(
+              host,
+              getActiveProxies: () =>
+                  _dbService.getActiveProxiesForGateway(currentProfileName),
+              onLog: addLog,
+            );
+            if (geo != null) {
+              record.country = geo['country'];
+              record.countryCode = geo['countryCode'];
+              record.isp = geo['isp'];
+            }
+
+            if (record.status == 'Active') {
+              final host = record.address.split(':')[0];
+
+              // 1. GeoIP Lookup
+              final geo = await _geoIpService.lookupCountry(
+                host,
+                getActiveProxies: () =>
+                    _dbService.getActiveProxiesForGateway(currentProfileName),
+                onLog: addLog,
+              );
+              if (geo != null) {
+                record.country = geo['country'];
+                record.countryCode = geo['countryCode'];
+                record.isp = geo['isp'];
+              }
+
+              // =================================================================
+              // AUTOMATED ABUSEIPDB FRAUD & SPAM SCORE LOOKUP (Auto-detect)
+              // =================================================================
+              final abuseResult = await AbuseIpdbService().checkIpAbuse(
+                host,
+                onLog: addLog,
+                onKeyUpdated: reloadAbuseKeys,
+              );
+              if (abuseResult != null) {
+                record.abuseScore = abuseResult.abuseScore;
+                record.totalAbuseReports = abuseResult.totalReports;
+                record.ipUsageType = abuseResult.usageType;
+
+                if (record.isSpam) {
+                  addLog(
+                    '[AbuseIPDB Flag] ${record.address} has ${record.abuseScore}% Abuse Confidence Score. Flagged as SPAM.',
+                  );
+                }
+              }
+
+              // =================================================================
+              // AUTOMATED SSL/MitM & CERTIFICATE TRANSPARENCY AUDIT
+              // =================================================================
+              if (autoAuditSsl) {
+                final sslResult =
+                    await SslIntegrityService.checkCertificateIntegrity(
+                      record,
+                      timeoutSeconds: 3,
+                    );
+                record.isMitmDetected = sslResult.isMitmDetected;
+                record.sslCertificateIssuer = sslResult.issuer;
+                record.isCtCompliant = sslResult.isCtCompliant;
+                record.sctCount = sslResult.sctCount;
+              }
+
+              // Platform reachability audit (if enabled)
+              if (autoProbePlatforms && record.status == 'Active') {
+                final reachability = await PlatformProbeService.probePlatforms(
+                  record,
+                  timeoutSeconds: 3,
+                );
+                record.platformReachability = reachability;
+              }
+
+              // AUTOMATED ECH & SNI PRIVACY AUDIT (NEW!)
+              if (autoAuditEch && record.status == 'Active') {
+                final echResult = await EchInspectorService.checkEchReadiness(
+                  record,
+                  timeoutSeconds: 3,
+                );
+                record.isEchReady = echResult.isEchReady;
+                record.echDetails = echResult.details;
+              }
+
+              // Automated Multi-Region SLA & Jitter Audit (if enabled)
+              if (autoProbeSla && record.status == 'Active') {
+                final slaResult = await SlaProbeService.auditRegionalSla(
+                  record,
+                  timeoutSeconds: 3,
+                );
+                record.jitterMs = slaResult.jitterMs;
+                record.slaScore = slaResult.slaScore;
+                record.regionalLatencies = slaResult.regionalLatencies;
+              }
+
+              // =================================================================
+              // AUTOMATED HTML CONTENT INTEGRITY & AD-INJECTION AUDIT
+              // =================================================================
+              if (autoAuditTampering && record.status == 'Active') {
+                final tamperResult =
+                    await ContentIntegrityService.auditContentIntegrity(
+                      record,
+                      timeoutSeconds: 3,
+                    );
+                record.isContentTampered = tamperResult.isTampered;
+                record.tamperDetails = tamperResult.details;
+
+                if (record.isContentTampered) {
+                  addLog(
+                    '[TAMPERING DETECTED] ${record.address} injected scripts/ads into HTTP traffic! (${tamperResult.details})',
+                  );
+                }
+              }
+
+              // =================================================================
+              // AUTOMATED DOWNLOAD SPEED BENCHMARK (Only if toggle is enabled!)
+              // =================================================================
+              if (autoSpeedTest && record.status == 'Active') {
+                final speedBps = await SpeedTestService.measureDownloadSpeed(
+                  record,
+                  timeoutSeconds: 5,
+                );
+                record.downloadSpeedBps = speedBps;
+                if (speedBps != null) {
+                  addLog(
+                    '[Speed Benchmark] ${record.address} download throughput: ${record.formattedSpeed}',
+                  );
+                }
+              }
+            }
+          }
+        } catch (_) {
+          record.status = 'Failed';
+        }
+
+        // Save verification update to SQLite immediately
+        _dbService.updateProxyRecord(currentProfileName, record);
+
+        completed++;
+        progress = targetCount > 0
+            ? (completed / targetCount).clamp(0.0, 1.0)
+            : 0.0;
+
+        final now = DateTime.now();
+        if (now.difference(lastUiUpdate).inMilliseconds > 60 ||
+            completed == targetCount) {
+          lastUiUpdate = now;
+          refreshStats();
+          notifyListeners();
+        }
+      }
+    }
+
+    final workers = List.generate(
+      concurrency > queue.length ? queue.length : concurrency,
+      (_) => worker(),
+    );
+
+    await Future.wait(workers);
+
+    isRunning = false;
+    refreshStats();
+    addLog('Diagnostics complete. SQLite updated.');
+    notifyListeners();
+  }
+
+  /// On-demand: Tests download speed for a single node via right-click
+  Future<void> testSingleProxySpeed(ProxyRecord record) async {
+    addLog(
+      'Benchmarking download throughput for ${record.address} (256KB Cloudflare chunk)...',
+    );
+
+    final speed = await SpeedTestService.measureDownloadSpeed(
+      record,
+      timeoutSeconds: 6,
+    );
+    record.downloadSpeedBps = speed;
+
+    _dbService.updateProxyRecord(currentProfileName, record);
+    refreshStats();
+
+    if (speed != null) {
+      addLog(
+        '${record.address} Throughput: ${record.formattedSpeed} (${record.speedTier})',
+      );
+    } else {
+      addLog('${record.address} Speed test timed out.');
+    }
+    notifyListeners();
+  }
+
+  /// Probes platform reachability for a single node on demand
+  Future<void> probeSingleNodeReachability(ProxyRecord record) async {
+    addLog(
+      'Auditing reachability for ${record.address} (Google, Cloudflare, Wikipedia, GitHub)...',
+    );
+
+    final results = await PlatformProbeService.probePlatforms(record);
+    record.platformReachability = results;
+
+    _dbService.updateProxyRecord(currentProfileName, record);
+    addLog('${record.address} classification: ${record.reachabilityStatus}');
+    notifyListeners();
+  }
+
+  /// Batch probes all active nodes in the current workspace
+  Future<void> probeAllActiveReachability() async {
+    if (isRunning) return;
+    final activeNodes = _dbService.getActiveProxiesForGateway(
+      currentProfileName,
+    );
+    if (activeNodes.isEmpty) {
+      addLog('No active proxies to probe.');
+      return;
+    }
+
+    addLog(
+      'Starting service reachability audit across ${activeNodes.length} active nodes...',
+    );
+    for (int i = 0; i < activeNodes.length; i++) {
+      final node = activeNodes[i];
+      final results = await PlatformProbeService.probePlatforms(node);
+      node.platformReachability = results;
+      _dbService.updateProxyRecord(currentProfileName, node);
+      notifyListeners();
+    }
+    addLog('Service reachability audit finished.');
+  }
+
+  /// 1-Click: Permanently removes all failed nodes from the list and disk
+  Future<void> purgeFailedNodes() async {
+    if (isRunning) return;
+    final purged = _dbService.purgeFailedProxies(currentProfileName);
+    if (purged > 0) {
+      // Auto-compact to shrink database file after deleting nodes
+      final saved = _dbService.compactDatabase();
+      refreshStats();
+      SystemTrayService().updateTrayMenu();
+      addLog(
+        'Purged $purged failed nodes. Reclaimed ${(saved / 1024).toStringAsFixed(1)} KB disk space.',
+      );
+      notifyListeners();
+    }
+  }
+
+  Future<void> exportLogs() async {
+    if (logs.isEmpty) {
+      addLog('No logs available to export.');
+      return;
+    }
+
+    String? outputPath = await FilePicker.platform.saveFile(
+      dialogTitle: 'Save Execution Logs',
+      fileName: 'network_monitor.log',
+      type: FileType.custom,
+      allowedExtensions: ['log', 'txt'],
+    );
+
+    if (outputPath != null) {
+      final file = File(outputPath);
+      await file.writeAsString(logs.reversed.join('\n'));
+      addLog('Logs saved to $outputPath');
+    }
+  }
+
+  /// Audits SSL certificate for a single node without changing its Active status
+  Future<void> probeSslIntegrity(ProxyRecord record) async {
+    addLog('Auditing SSL certificate integrity for ${record.address}...');
+    final result = await SslIntegrityService.checkCertificateIntegrity(record);
+
+    record.isMitmDetected = result.isMitmDetected;
+    record.sslCertificateIssuer = result.issuer;
+    record.isCtCompliant = result.isCtCompliant;
+    record.sctCount = result.sctCount;
+
+    // Log the certificate information without overriding the node's Active status
+    if (result.isMitmDetected) {
+      addLog(
+        '[SSL Notice] ${record.address} untrusted/self-signed certificate. Issuer: ${result.issuer}',
+      );
+    } else {
+      addLog('${record.address} certificate valid: ${result.issuer}');
+    }
+
+    _dbService.updateProxyRecord(currentProfileName, record);
+    refreshStats();
+    notifyListeners();
+  }
+
+  Future<void> startPortScan(String host, {List<int>? ports}) async {
+    if (isPortScanning) return;
+
+    final cleanHost = host
+        .trim()
+        .replaceAll(RegExp(r'^(https?:\/\/|socks5:\/\/)'), '')
+        .split(':')
+        .first;
+    if (cleanHost.isEmpty) return;
+
+    isPortScanning = true;
+    portScanTargetHost = cleanHost;
+    portScanResults.clear();
+    addLog('[Port Scanner] Starting scan on $cleanHost...');
+    notifyListeners();
+
+    try {
+      await _portScanner
+          .scanHost(
+            host: cleanHost,
+            targetPorts: ports,
+            onPortScanned: (result) {
+              // Updates UI live as each port finishes probing
+              notifyListeners();
+            },
+          )
+          .then((list) {
+            portScanResults = list;
+            final openCount = list.where((r) => r.isOpen).length;
+            addLog(
+              '[Port Scanner] Finished scan on $cleanHost: Found $openCount open ports.',
+            );
+          });
+    } catch (e) {
+      addLog('[Port Scanner] Error scanning $cleanHost: $e');
+    } finally {
+      isPortScanning = false;
+      notifyListeners();
+    }
+  }
+
+  void clearPortScanResults() {
+    portScanResults.clear();
+    portScanTargetHost = '';
+    notifyListeners();
+  }
+
+  /// Exports recorded Live Traffic entries into a W3C HAR 1.2 file
+  Future<bool> exportTrafficHar() async {
+    if (liveTraffic.isEmpty) {
+      addLog('No traffic recorded to export.');
+      return false;
+    }
+
+    addLog('Exporting ${liveTraffic.length} traffic entries to HAR archive...');
+    final success = await HarExportService.exportToHar(liveTraffic);
+    if (success) {
+      addLog('HAR file saved successfully.');
+    }
+    return success;
+  }
+
+  /// Generates and prompts to save the Support & Diagnostic Bundle
+  Future<bool> generateSupportBundle() async {
+    addLog('Generating system diagnostic and support bundle...');
+    return await SupportBundleService.generateAndExportReport(this);
+  }
+
+  /// 1-Click: Clears flapping penalty for a specific node
+  void resetFlapHistory(ProxyRecord record) {
+    record.flapCount = 0;
+    record.lastStatusChange = null;
+    _dbService.resetProxyFlapCount(currentProfileName, record);
+    refreshStats();
+    addLog(
+      'Reset flap penalty for ${record.address}. Node restored to 100% stability.',
+    );
+    notifyListeners();
+  }
+
+  void stop() async {
+    isRunning = false;
+    addLog('Execution stopped by user. Saving current state...');
+    await saveCurrentProfile();
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    NetworkHandoverService().stopMonitoring();
+    if (isSystemProxyActive) {
+      _systemProxyService.disableSystemProxy();
+    }
+    _gatewayService.stopServer();
+    _socks5Service.stopServer();
+    _wifiService.stopServer();
+    super.dispose();
+  }
+}
