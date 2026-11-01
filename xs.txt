@@ -1,0 +1,2613 @@
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
+
+import '../controllers/monitor_controller.dart';
+import '../services/domain_shield_service.dart';
+import '../services/local_gateway_service.dart';
+import '../models/gateway_traffic_entry.dart';
+import '../services/dns_resolver_service.dart';
+
+class GatewayView extends StatelessWidget {
+  const GatewayView({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = context.watch<MonitorController>();
+    final activeCount = controller.activeCount;
+
+    return SingleChildScrollView(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Local Proxy Gateway & Windows Bridge',
+              style: Theme.of(context).textTheme.headlineMedium
+                  ?.copyWith(fontWeight: FontWeight.bold, fontSize: 24),
+            ),
+            Text(
+              'Route your entire PC or specific software through your verified active proxies.',
+              style: TextStyle(color: Colors.grey[400], fontSize: 13),
+            ),
+            const SizedBox(height: 20),
+
+            // =================================================================
+            // 1. MAIN GATEWAY STATUS BANNER
+            // =================================================================
+            Card(
+              color: controller.isGatewayRunning
+                  ? Colors.green.withValues(alpha: 0.1)
+                  : const Color(0xFF1E222A),
+              child: Padding(
+                padding: const EdgeInsets.all(20.0),
+                child: Row(
+                  children: [
+                    Icon(
+                      controller.isGatewayRunning
+                          ? Icons.radar
+                          : Icons.power_settings_new,
+                      size: 40,
+                      color: controller.isGatewayRunning
+                          ? Colors.greenAccent
+                          : Colors.grey,
+                    ),
+                    const SizedBox(width: 16),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          controller.isGatewayRunning
+                              ? 'HTTP: 127.0.0.1:${controller.gatewayPort}  •  SOCKS5: 127.0.0.1:${controller.socks5Port}'
+                              : 'Gateway Offline',
+                          style: const TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            Text(
+                              controller.isGatewayRunning
+                                  ? 'Forwarding via $activeCount active nodes'
+                                  : 'Start the bridge to listen on localhost',
+                              style: TextStyle(
+                                color: Colors.grey[400],
+                                fontSize: 12,
+                              ),
+                            ),
+                            // Telemetry Badges (Failovers & Circuit Breaker)
+                            if (controller.isGatewayRunning) ...[
+                              const SizedBox(width: 12),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.blueAccent.withValues(
+                                    alpha: 0.2,
+                                  ),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.security,
+                                      size: 12,
+                                      color: Colors.blueAccent,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Failovers: ${controller.gatewayFailoverCount}',
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blueAccent,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.amber.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.flash_on,
+                                      size: 12,
+                                      color: Colors.amberAccent,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Auto-Pruned: ${controller.totalCircuitBreakerTrips}',
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.amberAccent,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                    ),
+                    const Spacer(),
+
+                    // Action Buttons Row
+                    ElevatedButton.icon(
+                      onPressed: activeCount == 0
+                          ? null
+                          : controller.toggleGateway,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: controller.isGatewayRunning
+                            ? Colors.redAccent
+                            : Colors.greenAccent,
+                        foregroundColor: controller.isGatewayRunning
+                            ? Colors.white
+                            : Colors.black,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 14,
+                        ),
+                      ),
+                      icon: Icon(
+                        controller.isGatewayRunning
+                            ? Icons.stop
+                            : Icons.play_arrow,
+                      ),
+                      label: Text(
+                        controller.isGatewayRunning
+                            ? 'Stop Bridge'
+                            : 'Start Bridge',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+
+                    // Warm Up Pool Button
+                    OutlinedButton.icon(
+                      onPressed:
+                          (controller.activeCount == 0 ||
+                              controller.isWarmingUp)
+                          ? null
+                          : () => controller.warmUpActivePool(topCount: 10),
+                      icon: controller.isWarmingUp
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(
+                              Icons.bolt,
+                              size: 16,
+                              color: Colors.amberAccent,
+                            ),
+                      label: Text(
+                        controller.isWarmingUp ? 'Warming...' : 'Warm Up',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 14,
+                        ),
+                      ),
+                    ),
+
+                    // Open Browser Button
+                    if (controller.isGatewayRunning) ...[
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          final tempProfile =
+                              '${Directory.systemTemp.path}\\edge_proxy_session';
+                          Process.start('cmd.exe', [
+                            '/c',
+                            'start',
+                            '""',
+                            'msedge.exe',
+                            '--proxy-server=http://127.0.0.1:${controller.gatewayPort}',
+                            '--user-data-dir=$tempProfile',
+                            '--no-first-run',
+                            'https://api.ipify.org',
+                          ]);
+                        },
+                        icon: const Icon(Icons.open_in_browser, size: 16),
+                        label: const Text(
+                          'Open Browser',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 14,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 2. SETTINGS ROW (Windows Proxy + Routing Strategy)
+            // =================================================================
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Windows System Proxy Card
+                Expanded(
+                  child: Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                'Windows System Proxy',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Copy PAC Script URL',
+                                icon: const Icon(Icons.link, size: 18),
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () {
+                                  final pacUrl =
+                                      'http://127.0.0.1:${controller.gatewayPort}/proxy.pac';
+                                  Clipboard.setData(
+                                    ClipboardData(text: pacUrl),
+                                  );
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('PAC URL copied: $pacUrl'),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                          const Divider(),
+                          Text(
+                            controller.usePacMode
+                                ? 'Smart PAC Mode: Bypasses local intranet, printers, and banking sites.'
+                                : 'Global Mode: Forces 100% of all Windows OS traffic through the gateway.',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[400],
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+
+                          Row(
+                            children: [
+                              ChoiceChip(
+                                label: const Text(
+                                  'Smart PAC Script',
+                                  style: TextStyle(fontSize: 11),
+                                ),
+                                selected: controller.usePacMode,
+                                selectedColor: controller.accentColor.color,
+                                onSelected: controller.isSystemProxyActive
+                                    ? null
+                                    : (_) => controller.setUsePacMode(true),
+                              ),
+                              const SizedBox(width: 8),
+                              ChoiceChip(
+                                label: const Text(
+                                  'Global Tunnel',
+                                  style: TextStyle(fontSize: 11),
+                                ),
+                                selected: !controller.usePacMode,
+                                selectedColor: controller.accentColor.color,
+                                onSelected: controller.isSystemProxyActive
+                                    ? null
+                                    : (_) => controller.setUsePacMode(false),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 10),
+
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(
+                              controller.isSystemProxyActive
+                                  ? (controller.usePacMode
+                                        ? 'System Proxy: PAC Active'
+                                        : 'System Proxy: Global ON')
+                                  : 'System Proxy: OFF',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: controller.isSystemProxyActive
+                                    ? Colors.greenAccent
+                                    : Colors.grey,
+                              ),
+                            ),
+                            value: controller.isSystemProxyActive,
+                            onChanged: controller.isGatewayRunning
+                                ? (_) => controller.toggleSystemProxy()
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 16),
+
+                // Routing Strategy Card
+                Expanded(
+                  child: Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text(
+                                'Routing Strategy',
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              if (controller.gatewayMode ==
+                                  GatewayRoutingMode.stickyTime)
+                                DropdownButton<int>(
+                                  value: controller.stickyMinutes,
+                                  underline: const SizedBox(),
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.amberAccent,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: 5,
+                                      child: Text('Every 5m'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 10,
+                                      child: Text('Every 10m'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 15,
+                                      child: Text('Every 15m'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: 30,
+                                      child: Text('Every 30m'),
+                                    ),
+                                  ],
+                                  onChanged: (val) {
+                                    if (val != null) {
+                                      controller.setStickyMinutes(val);
+                                    }
+                                  },
+                                ),
+                            ],
+                          ),
+                          const Divider(),
+                          Text(
+                            _getStrategyDescription(
+                              controller.gatewayMode,
+                              controller.stickyMinutes,
+                            ),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.grey[400],
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              _buildStrategyChip(
+                                controller,
+                                mode: GatewayRoutingMode.fastest,
+                                label: 'Fastest Node',
+                                icon: Icons.bolt,
+                              ),
+                              _buildStrategyChip(
+                                controller,
+                                mode: GatewayRoutingMode.roundRobin,
+                                label: 'Round-Robin',
+                                icon: Icons.sync,
+                              ),
+                              _buildStrategyChip(
+                                controller,
+                                mode: GatewayRoutingMode.stickyDomain,
+                                label: 'Domain Sticky',
+                                icon: Icons.language,
+                              ),
+                              _buildStrategyChip(
+                                controller,
+                                mode: GatewayRoutingMode.stickyTime,
+                                label: 'Time Sticky',
+                                icon: Icons.timer_outlined,
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          const Divider(height: 10),
+
+                          // Cleanly aligned below the Wrap
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text(
+                              'Exclude Spam & High-Risk Proxies',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            subtitle: const Text(
+                              'When enabled, traffic is never routed through nodes with Abuse Score ≥ 20%.',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
+                            value: controller.excludeSpamFromGateway,
+                            activeThumbColor: Colors.deepOrangeAccent,
+                            onChanged: (val) =>
+                                controller.toggleExcludeSpamFromGateway(val),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 3. LIVE TRAFFIC INSPECTOR (MINI-FIDDLER STREAM)
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.stream,
+                          color: Colors.indigoAccent,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Live Traffic Inspector',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        if (controller.isGatewayRunning)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.greenAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: const [
+                                Icon(
+                                  Icons.circle,
+                                  size: 8,
+                                  color: Colors.greenAccent,
+                                ),
+                                SizedBox(width: 4),
+                                Text(
+                                  'STREAMING',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.greenAccent,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        const Spacer(),
+                        SizedBox(
+                          width: 200,
+                          height: 32,
+                          child: TextField(
+                            decoration: InputDecoration(
+                              hintText: 'Filter domain/status...',
+                              prefixIcon: const Icon(Icons.search, size: 14),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                            ),
+                            onChanged: controller.setTrafficFilterQuery,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        IconButton(
+                          tooltip: 'Export Traffic as HAR (Chrome DevTools / Postman)',
+                          icon: const Icon(
+                            Icons.file_download_outlined,
+                            size: 18,
+                            color: Colors.indigoAccent,
+                          ),
+                          onPressed: controller.liveTraffic.isEmpty
+                              ? null
+                              : () async {
+                                  final ok = await controller
+                                      .exportTrafficHar();
+                                  if (context.mounted && ok) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'HAR file exported successfully!',
+                                        ),
+                                        backgroundColor: Colors.green,
+                                      ),
+                                    );
+                                  }
+                                },
+                        ),
+                        IconButton(
+                          tooltip: 'Clear Traffic Stream',
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          onPressed: controller.liveTraffic.isEmpty
+                              ? null
+                              : controller.clearTrafficLogs,
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 16),
+
+                    Container(
+                      height: 280,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF14171C),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: Colors.white10),
+                      ),
+                      child: controller.filteredTraffic.isEmpty
+                          ? Center(
+                              child: Text(
+                                controller.isGatewayRunning
+                                    ? 'Awaiting browser traffic... (Send requests to 127.0.0.1:8888 or 1080)'
+                                    : 'Gateway is offline. Start the bridge to inspect live requests.',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            )
+                          : ListView.separated(
+                              itemCount: controller.filteredTraffic.length,
+                              separatorBuilder: (_, _) => const Divider(
+                                height: 1,
+                                color: Colors.white10,
+                              ),
+                              itemBuilder: (context, index) {
+                                final entry = controller.filteredTraffic[index];
+                                final isSuccess =
+                                    entry.statusCode == 200 ||
+                                    entry.statusCode == 204;
+                                final isBlocked =
+                                    entry.statusCode == 403 ||
+                                    entry.statusCode == 407;
+
+                                return InkWell(
+                                  onTap: () =>
+                                      _showTrafficDetailsDialog(context, entry),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 8,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Text(
+                                          entry.formattedTime,
+                                          style: const TextStyle(
+                                            fontFamily: 'monospace',
+                                            fontSize: 11,
+                                            color: Colors.grey,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 4,
+                                            vertical: 1,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: entry.protocol == 'SOCKS5'
+                                                ? Colors.purple.withValues(
+                                                    alpha: 0.2,
+                                                  )
+                                                : Colors.blueGrey.withValues(
+                                                    alpha: 0.2,
+                                                  ),
+                                            borderRadius: BorderRadius.circular(
+                                              3,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            entry.protocol,
+                                            style: const TextStyle(
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.white70,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 5,
+                                            vertical: 1,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: entry.method == 'CONNECT'
+                                                ? Colors.purpleAccent
+                                                      .withValues(alpha: 0.2)
+                                                : Colors.blueAccent.withValues(
+                                                    alpha: 0.2,
+                                                  ),
+                                            borderRadius: BorderRadius.circular(
+                                              3,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            entry.method,
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              fontWeight: FontWeight.bold,
+                                              color: entry.method == 'CONNECT'
+                                                  ? Colors.purpleAccent
+                                                  : Colors.blueAccent,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Text(
+                                            '${entry.host}:${entry.port}',
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white10,
+                                            borderRadius: BorderRadius.circular(
+                                              4,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            entry.upstreamCountry != null
+                                                ? '${entry.upstreamProxy} [${entry.upstreamCountry}]'
+                                                : entry.upstreamProxy,
+                                            style: const TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: 10,
+                                              color: Colors.white70,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 6,
+                                            vertical: 2,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: isSuccess
+                                                ? Colors.greenAccent.withValues(
+                                                    alpha: 0.15,
+                                                  )
+                                                : isBlocked
+                                                ? Colors.orangeAccent
+                                                      .withValues(alpha: 0.15)
+                                                : Colors.redAccent.withValues(
+                                                    alpha: 0.15,
+                                                  ),
+                                            borderRadius: BorderRadius.circular(
+                                              4,
+                                            ),
+                                          ),
+                                          child: Text(
+                                            '${entry.statusCode} ${entry.statusText}',
+                                            style: TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: isSuccess
+                                                  ? Colors.greenAccent
+                                                  : (isBlocked
+                                                        ? Colors.orangeAccent
+                                                        : Colors.redAccent),
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Text(
+                                          entry.formattedDataSize,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.grey,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 4. DEVELOPER HTTPS INSIGHT (DECRYPTION / FIDDLER-STYLE)
+            // =================================================================
+            Card(
+              color: controller.isHttpsInspectionEnabled
+                  ? Colors.deepOrange.withValues(alpha: 0.1)
+                  : const Color(0xFF1E222A),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.developer_mode,
+                              color: controller.isHttpsInspectionEnabled
+                                  ? Colors.deepOrangeAccent
+                                  : Colors.grey,
+                              size: 20,
+                            ),
+                            const SizedBox(width: 8),
+                            const Text(
+                              'Developer HTTPS Insight Mode (Fiddler-Style)',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Switch(
+                          value: controller.isHttpsInspectionEnabled,
+                          activeThumbColor: Colors.deepOrangeAccent,
+                          onChanged: (val) {
+                            if (val && !controller.isDevCertInstalled) {
+                              _showCertInstallPrompt(context, controller);
+                            } else {
+                              controller.toggleHttpsInspection(val);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    Text(
+                      'Terminates TLS locally using a developer certificate to decrypt and display JSON bodies, request headers, and response payloads in the Live Traffic Inspector. Intended strictly for local API debugging.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                    ),
+                    const SizedBox(height: 10),
+
+                    Row(
+                      children: [
+                        Icon(
+                          controller.isDevCertInstalled
+                              ? Icons.verified_user
+                              : Icons.warning_amber_rounded,
+                          size: 16,
+                          color: controller.isDevCertInstalled
+                              ? Colors.greenAccent
+                              : Colors.amberAccent,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          controller.isDevCertInstalled
+                              ? 'Root Certificate: Installed & Trusted (CurrentUser)'
+                              : 'Root Certificate: Not Installed',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: controller.isDevCertInstalled
+                                ? Colors.greenAccent
+                                : Colors.amberAccent,
+                          ),
+                        ),
+                        const Spacer(),
+                        if (!controller.isDevCertInstalled)
+                          ElevatedButton.icon(
+                            onPressed: () =>
+                                _showCertInstallPrompt(context, controller),
+                            icon: const Icon(Icons.security, size: 14),
+                            label: const Text(
+                              'Install Root Certificate',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.indigoAccent,
+                              foregroundColor: Colors.white,
+                            ),
+                          )
+                        else
+                          OutlinedButton.icon(
+                            onPressed: controller.removeDevCertificate,
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              size: 14,
+                              color: Colors.redAccent,
+                            ),
+                            label: const Text(
+                              'Remove Certificate from Windows',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.redAccent,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 5. UPSTREAM DNS PRIVACY RESOLVER (DoH) CARD
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: const [
+                            Icon(
+                              Icons.dns_outlined,
+                              color: Colors.blueAccent,
+                              size: 20,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Upstream DNS Privacy Resolver (DoH)',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () =>
+                              _showDnsTestDialog(context, controller),
+                          icon: const Icon(Icons.speed, size: 14),
+                          label: const Text(
+                            'Test DNS Speed',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    Text(
+                      'Resolves all gateway and diagnostic domain lookups via encrypted DNS-over-HTTPS (DoH). '
+                      'Prevents local network and ISP snooping on visited hostnames.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Updated to use 'value' instead of initialValue for live updates
+                    DropdownButtonFormField<DnsResolverPreset>(
+                      initialValue: controller.activeDnsPreset,
+                      decoration: const InputDecoration(
+                        labelText: 'Active DNS Privacy Provider',
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        border: OutlineInputBorder(),
+                      ),
+                      items: DnsResolverPreset.values.map((preset) {
+                        return DropdownMenuItem<DnsResolverPreset>(
+                          value: preset,
+                          child: Text(
+                            preset.label,
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (val) {
+                        if (val != null) controller.setDnsPreset(val);
+                      },
+                    ),
+
+                    if (controller.activeDnsPreset ==
+                        DnsResolverPreset.custom) ...[
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: TextEditingController(
+                          text: controller.customDohUrl,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'Custom DoH Endpoint URL',
+                          hintText: 'https://dns.nextdns.io/YOUR_ID or https://freedns.controld.com/p2',
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                          border: OutlineInputBorder(),
+                        ),
+                        onSubmitted: (url) {
+                          controller.setDnsPreset(
+                            DnsResolverPreset.custom,
+                            customUrl: url,
+                          );
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 6. GEO-FENCING & EXCLUDED JURISDICTIONS
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.public_off_outlined,
+                          color: Colors.deepOrangeAccent,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Geo-Fencing & Excluded Jurisdictions',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        if (controller.excludedCountries.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.redAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${controller.excludedCountries.length} Blacklisted',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.redAccent,
+                              ),
+                            ),
+                          ),
+                        const Spacer(),
+                        if (controller.excludedCountries.isNotEmpty)
+                          TextButton(
+                            onPressed: controller.clearExcludedCountries,
+                            child: const Text(
+                              'Allow All',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const Divider(),
+                    Text(
+                      'Click any country to blacklist it. Blacklisted countries are filtered in SQLite and will NEVER route traffic through the gateway, even if they have the lowest latency.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                    ),
+                    const SizedBox(height: 12),
+
+                    controller.availableCountries.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 8.0),
+                            child: Text(
+                              'No countries detected in current pool yet.',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey,
+                              ),
+                            ),
+                          )
+                        : Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: controller.availableCountries.map((code) {
+                              final isBlacklisted = controller.excludedCountries
+                                  .contains(code);
+                              final count = controller.countryCounts[code] ?? 0;
+
+                              return FilterChip(
+                                label: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      isBlacklisted ? '🚫 $code' : code,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.bold,
+                                        color: isBlacklisted
+                                            ? Colors.redAccent
+                                            : Colors.white70,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '($count)',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.grey,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                selected: isBlacklisted,
+                                selectedColor: Colors.redAccent.withValues(
+                                  alpha: 0.25,
+                                ),
+                                checkmarkColor: Colors.redAccent,
+                                showCheckmark: false,
+                                side: BorderSide(
+                                  color: isBlacklisted
+                                      ? Colors.redAccent
+                                      : Colors.white12,
+                                  width: isBlacklisted ? 1.2 : 0.8,
+                                ),
+                                onSelected: (_) =>
+                                    controller.toggleExcludedCountry(code),
+                              );
+                            }).toList(),
+                          ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 7. MULTI-HOP DOUBLE CHAINING
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: const [
+                            Icon(
+                              Icons.alt_route,
+                              color: Colors.purpleAccent,
+                              size: 20,
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Multi-Hop Double Chaining',
+                              style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Switch(
+                          value: controller.isMultiHopEnabled,
+                          activeThumbColor: Colors.purpleAccent,
+                          onChanged: (val) => controller.toggleMultiHop(val),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    Text(
+                      'Tunnels traffic sequentially: Client ➔ Entry Node (Fastest) ➔ Exit Node (Target Country) ➔ Destination. '
+                      'The target site only sees the Exit IP, while the Entry proxy only sees your real IP.',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[400]),
+                    ),
+                    const SizedBox(height: 10),
+
+                    if (controller.isMultiHopEnabled) ...[
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.purple.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: Colors.purpleAccent.withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.laptop,
+                              size: 16,
+                              color: Colors.white70,
+                            ),
+                            const SizedBox(width: 6),
+                            const Text(
+                              'Your PC',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            const Icon(
+                              Icons.arrow_forward,
+                              size: 12,
+                              color: Colors.grey,
+                            ),
+                            const SizedBox(width: 6),
+                            const Text(
+                              'Entry (Fastest)',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.greenAccent,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            const Icon(
+                              Icons.arrow_forward,
+                              size: 12,
+                              color: Colors.grey,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              controller.multiHopExitCountry != null
+                                  ? 'Exit [${controller.multiHopExitCountry}]'
+                                  : 'Exit (Any Country)',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.purpleAccent,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            const Icon(
+                              Icons.arrow_forward,
+                              size: 12,
+                              color: Colors.grey,
+                            ),
+                            const SizedBox(width: 6),
+                            const Text(
+                              'Target Web',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+
+                      Row(
+                        children: [
+                          const Text(
+                            'Target Exit Country: ',
+                            style: TextStyle(fontSize: 12),
+                          ),
+                          const SizedBox(width: 8),
+                          DropdownButton<String?>(
+                            value: controller.multiHopExitCountry,
+                            underline: const SizedBox(),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.purpleAccent,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            items: [
+                              const DropdownMenuItem<String?>(
+                                value: null,
+                                child: Text('Any Country (Automatic)'),
+                              ),
+                              ...controller.availableCountries.map(
+                                (c) => DropdownMenuItem<String?>(
+                                  value: c,
+                                  child: Text(
+                                    '$c (${controller.countryCounts[c] ?? 0} active)',
+                                  ),
+                                ),
+                              ),
+                            ],
+                            onChanged: (country) =>
+                                controller.setMultiHopExitCountry(country),
+                          ),
+                        ],
+                      ),
+
+                      if (controller.isGatewayRunning &&
+                          controller.currentChainInfo != null) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          'Active Route: ${controller.currentChainInfo}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontFamily: 'monospace',
+                            color: Colors.greenAccent,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 8. NETWORK PRIVACY & LEAK DEFENSES CARD
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: const [
+                        Icon(
+                          Icons.shield_outlined,
+                          color: Colors.tealAccent,
+                          size: 20,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Network Privacy & Leak Defenses',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    const SizedBox(height: 6),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Gateway Kill Switch',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: const Text(
+                        'Strips DIRECT fallback. If all proxies die, all traffic is cut off to strictly prevent real IP leaks.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.isKillSwitchEnabled,
+                      activeThumbColor: Colors.tealAccent,
+                      onChanged: (val) => controller.toggleKillSwitch(val),
+                    ),
+                    const Divider(height: 12),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'HTTPS-Only Enforcement',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: const Text(
+                        'Blocks unencrypted plaintext HTTP (port 80). Prevents public proxies from sniffing or tampering with traffic.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.isHttpsOnlyEnabled,
+                      activeThumbColor: Colors.tealAccent,
+                      onChanged: (val) => controller.toggleHttpsOnly(val),
+                    ),
+                    const Divider(height: 12),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Block Content-Tampered Proxies',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: const Text(
+                        'Refuses to route traffic through proxies that inject ads, pop-ups, or scripts into unencrypted web traffic.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.excludeTamperedFromGateway,
+                      activeThumbColor: Colors.tealAccent,
+                      onChanged: (val) =>
+                          controller.toggleExcludeTamperedFromGateway(val),
+                    ),
+                    const Divider(height: 12),
+
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4.0),
+                      child: Row(
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Adapter Handover & Auto-Rebind',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Current Interface: ${controller.activeAdapterName} • ${controller.totalHandoverEvents} rebinds recorded',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.greenAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              'MONITORING',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.greenAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 12),
+
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'IPv6 Leak Protection',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              controller.ipv6AuditResult == null
+                                  ? 'Audit whether dual-stack traffic is leaking outside your IPv4 proxies.'
+                                  : controller.ipv6AuditResult!.message,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color:
+                                    controller.ipv6AuditResult?.isLeaking ==
+                                        true
+                                    ? Colors.redAccent
+                                    : Colors.grey,
+                              ),
+                            ),
+                          ],
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: controller.isTestingIpv6
+                              ? null
+                              : controller.auditIpv6Leak,
+                          icon: controller.isTestingIpv6
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.network_check, size: 14),
+                          label: const Text(
+                            'Audit IPv6',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 12),
+
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4.0),
+                      child: Row(
+                        children: [
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: const [
+                              Text(
+                                'DNS Rebinding & Host Validation',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              SizedBox(height: 2),
+                              Text(
+                                'Strict Host header enforcement active. Blocks external websites from probing 127.0.0.1.',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.greenAccent.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: const Text(
+                              'ENFORCED',
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.greenAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 9. GATEWAY ACCESS CONTROL & THREAT SHIELD
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: const [
+                        Icon(
+                          Icons.lock_person_outlined,
+                          color: Colors.indigoAccent,
+                          size: 20,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Gateway Access Control & Threat Shield',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    const SizedBox(height: 6),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Row(
+                        children: [
+                          const Text(
+                            'Gateway Token Authentication',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          if (controller.isGatewayAuthEnabled)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.amber.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                '${controller.gatewayUsername}:${controller.gatewayPassword}',
+                                style: const TextStyle(
+                                  fontSize: 11,
+                                  fontFamily: 'monospace',
+                                  color: Colors.amberAccent,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      subtitle: const Text(
+                        'Requires Proxy-Authorization (HTTP 407). Prevents rogue local programs from using your gateway without credentials.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.isGatewayAuthEnabled,
+                      activeThumbColor: Colors.indigoAccent,
+                      onChanged: (val) {
+                        if (val) {
+                          _showAuthSetupDialog(context, controller);
+                        } else {
+                          controller.setGatewayAuth(
+                            enabled: false,
+                            user: controller.gatewayUsername,
+                            pass: controller.gatewayPassword,
+                          );
+                        }
+                      },
+                    ),
+                    const Divider(height: 12),
+
+                    Row(
+                      children: [
+                        Expanded(
+                          child: SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Row(
+                              children: [
+                                const Text(
+                                  'Malicious Domain & Ad Shield',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                if (controller.totalShieldBlockedRequests > 0)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 6,
+                                      vertical: 2,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.redAccent.withValues(
+                                        alpha: 0.2,
+                                      ),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      'Blocked: ${controller.totalShieldBlockedRequests}',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.redAccent,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                            subtitle: const Text(
+                              'Silently drops requests to known malware C2, phishing, and ad-tracking domains before sending to proxies.',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
+                            value: controller.isDomainShieldEnabled,
+                            activeThumbColor: Colors.indigoAccent,
+                            onChanged: (val) =>
+                                controller.toggleDomainShield(val),
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () =>
+                              _showCustomDomainDialog(context, controller),
+                          icon: const Icon(Icons.rule, size: 14),
+                          label: const Text(
+                            'Blocklist',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 10. NETWORK STEALTH & PORT OBFUSCATION CARD
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: const [
+                        Icon(
+                          Icons.visibility_off_outlined,
+                          color: Colors.purpleAccent,
+                          size: 20,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Network Stealth & Port Obfuscation',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    const SizedBox(height: 6),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Stealth Gateway Port Knocking',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: const Text(
+                        'Silently drops port scans (Nmap) with no HTTP response. Requires authorization knock before port opens.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.isStealthKnockEnabled,
+                      activeThumbColor: Colors.purpleAccent,
+                      onChanged: (val) => controller.toggleStealthKnock(val),
+                    ),
+
+                    if (controller.isStealthKnockEnabled) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.purple.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: Colors.purpleAccent.withValues(alpha: 0.3),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Text(
+                                  'Knock Secret Token: ',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                Text(
+                                  controller.stealthKnockSecret,
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontFamily: 'monospace',
+                                    color: Colors.purpleAccent,
+                                  ),
+                                ),
+                                const Spacer(),
+                                ElevatedButton.icon(
+                                  onPressed: controller.authorizeLocalhostKnock,
+                                  icon: const Icon(Icons.key, size: 14),
+                                  label: const Text(
+                                    'Unseal This PC (60m)',
+                                    style: TextStyle(fontSize: 11),
+                                  ),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.purpleAccent,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'How to knock via terminal:\ncurl http://127.0.0.1:8888/knock?token=YOUR_TOKEN',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                                color: Colors.white70,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+
+                    const Divider(height: 12),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'RFC 7830 / 8467 DNS Padding & Entropy',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      subtitle: const Text(
+                        'Pads outgoing DNS queries to uniform 128-byte blocks and injects timing jitter to defeat packet-size analysis.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.isDnsPaddingEnabled,
+                      activeThumbColor: Colors.purpleAccent,
+                      onChanged: (val) => controller.toggleDnsPadding(val),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 11. OUTBOUND PAYLOAD & THREAT FILTERING CARD
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: const [
+                        Icon(
+                          Icons.enhanced_encryption_outlined,
+                          color: Colors.amberAccent,
+                          size: 20,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Outbound Payload & Threat Filtering',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(),
+                    const SizedBox(height: 6),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Row(
+                        children: [
+                          const Text(
+                            'Outbound Secret Leak & Canary Shield (DLP)',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          if (controller.totalDlpBlocked > 0)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent.withValues(alpha: 0.2),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                'Blocked: ${controller.totalDlpBlocked}',
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.redAccent,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      subtitle: const Text(
+                        'Intercepts outgoing requests containing AWS keys, GitHub tokens, private keys, or API tokens before transmission.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
+                      value: controller.isDlpEnabled,
+                      activeThumbColor: Colors.amberAccent,
+                      onChanged: (val) => controller.toggleDlp(val),
+                    ),
+                    const Divider(height: 12),
+
+                    Row(
+                      children: [
+                        Expanded(
+                          child: SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Row(
+                              children: [
+                                const Text(
+                                  'Spamhaus DROP / FireHOL Threat Intel',
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white10,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    '${controller.totalThreatCidrs} Subnets',
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            subtitle: const Text(
+                              'Drops connections to confirmed botnet C2 servers and hijacked IP ranges in <0.1ms.',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey,
+                              ),
+                            ),
+                            value: controller.isThreatIntelEnabled,
+                            activeThumbColor: Colors.amberAccent,
+                            onChanged: (val) =>
+                                controller.toggleThreatIntel(val),
+                          ),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: controller.isSyncingThreatIntel
+                              ? null
+                              : controller.syncThreatIntel,
+                          icon: controller.isSyncingThreatIntel
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.sync, size: 14),
+                          label: Text(
+                            controller.isSyncingThreatIntel
+                                ? 'Syncing...'
+                                : 'Sync Intel',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // =================================================================
+            // 12. DUAL GATEWAY INTEGRATION GUIDE (HTTP & SOCKS5)
+            // =================================================================
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: const [
+                        Icon(
+                          Icons.integration_instructions_outlined,
+                          size: 18,
+                          color: Colors.indigoAccent,
+                        ),
+                        SizedBox(width: 8),
+                        Text(
+                          'Dual Gateway Integration Guide (HTTP & SOCKS5)',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const SelectableText(
+                        '# 1. TELEGRAM DESKTOP (SOCKS5):\n'
+                        'Settings -> Advanced -> Connection Type -> SOCKS5:\n'
+                        'Host: 127.0.0.1   Port: 1080\n\n'
+                        '# 2. CURL (SOCKS5 with Remote DNS):\n'
+                        'curl -x socks5h://127.0.0.1:1080 https://api.ipify.org\n\n'
+                        '# 3. GIT PROXY (SOCKS5):\n'
+                        'git config --global http.proxy socks5://127.0.0.1:1080\n\n'
+                        '# 4. PYTHON (Requests via HTTP Gateway):\n'
+                        'proxies = {"http": "http://127.0.0.1:8888", "https": "http://127.0.0.1:8888"}',
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 11,
+                          color: Colors.greenAccent,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showDnsTestDialog(BuildContext context, MonitorController controller) {
+    final domainCtrl = TextEditingController(text: 'cloudflare.com');
+    String? resultText;
+    bool isTesting = false;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF1E222A),
+          title: const Text('DNS Resolver Speed Test'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: domainCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Test Domain',
+                  hintText: 'google.com, github.com, cloudflare.com',
+                ),
+              ),
+              const SizedBox(height: 16),
+              if (isTesting)
+                const CircularProgressIndicator()
+              else if (resultText != null)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black38,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    resultText!,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      color: Colors.greenAccent,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+            ElevatedButton(
+              onPressed: isTesting
+                  ? null
+                  : () async {
+                      setDialogState(() => isTesting = true);
+                      final res = await controller.testDnsResolver(
+                        domainCtrl.text.trim(),
+                      );
+                      setDialogState(() {
+                        isTesting = false;
+                        resultText =
+                            'Provider : ${res['provider']}\n'
+                            'Resolved : ${res['ip']}\n'
+                            'Latency  : ${res['latencyMs']} ms';
+                      });
+                    },
+              child: const Text('Run Test'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showCertInstallPrompt(
+    BuildContext context,
+    MonitorController controller,
+  ) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E222A),
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: Colors.amberAccent),
+            SizedBox(width: 8),
+            Text('Enable HTTPS Decryption?'),
+          ],
+        ),
+        content: const SizedBox(
+          width: 480,
+          child: Text(
+            'This mode installs a local root certificate (NetworkDiagnostics_DevRootCA) into your personal Windows certificate store (Cert:\\CurrentUser\\Root).\n\n'
+            'This allows the local gateway to decrypt HTTPS sessions so you can inspect request/response JSON bodies in real time (similar to Fiddler or Charles Proxy).\n\n'
+            'You can cleanly remove this certificate from Windows with one click at any time.',
+            style: TextStyle(fontSize: 12),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.deepOrangeAccent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final ok = await controller.installDevCertificate();
+              if (ok) {
+                controller.toggleHttpsInspection(true);
+              }
+            },
+            child: const Text('Trust & Enable'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showTrafficDetailsDialog(
+    BuildContext context,
+    GatewayTrafficEntry entry,
+  ) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E222A),
+        title: Row(
+          children: [
+            const Icon(Icons.info_outline, color: Colors.indigoAccent),
+            const SizedBox(width: 8),
+            Text(
+              '${entry.method} ${entry.host}:${entry.port}',
+              style: const TextStyle(fontSize: 15, fontFamily: 'monospace'),
+            ),
+            const Spacer(),
+            if (entry.isDecrypted)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.deepOrange.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: const Text(
+                  'HTTPS DECRYPTED',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.deepOrangeAccent,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        content: SizedBox(
+          width: 580,
+          height: 400,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildDetailRow(
+                  'Timestamp',
+                  entry.timestamp.toLocal().toString(),
+                ),
+                _buildDetailRow('Protocol', entry.protocol),
+                _buildDetailRow('HTTP Method', entry.method),
+                _buildDetailRow('Target Host', '${entry.host}:${entry.port}'),
+                _buildDetailRow(
+                  'HTTP Status',
+                  '${entry.statusCode} (${entry.statusText})',
+                ),
+                _buildDetailRow('Upstream Proxy', entry.upstreamProxy),
+                _buildDetailRow('Tunnel Latency', '${entry.latencyMs} ms'),
+                _buildDetailRow('Data Transferred', entry.formattedDataSize),
+                const Divider(height: 20),
+
+                if (entry.requestBody != null &&
+                    entry.requestBody!.isNotEmpty) ...[
+                  const Text(
+                    'Decrypted Request:',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.deepOrangeAccent,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.black38,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: SelectableText(
+                      entry.requestBody!,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: Colors.white70,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                if (entry.responseBody != null &&
+                    entry.responseBody!.isNotEmpty) ...[
+                  const Text(
+                    'Decrypted Response Body:',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.greenAccent,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.black38,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: SelectableText(
+                      entry.responseBody!,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        color: Colors.greenAccent,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showAuthSetupDialog(
+    BuildContext context,
+    MonitorController controller,
+  ) {
+    final userCtrl = TextEditingController(text: controller.gatewayUsername);
+    final passCtrl = TextEditingController(text: controller.gatewayPassword);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E222A),
+        title: const Text('Gateway Authentication Token'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: userCtrl,
+              decoration: const InputDecoration(labelText: 'Username'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: passCtrl,
+              decoration: const InputDecoration(labelText: 'Password / Token'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              controller.setGatewayAuth(
+                enabled: true,
+                user: userCtrl.text,
+                pass: passCtrl.text,
+              );
+              Navigator.pop(ctx);
+            },
+            child: const Text('Enable Auth'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showCustomDomainDialog(
+    BuildContext context,
+    MonitorController controller,
+  ) {
+    final domainCtrl = TextEditingController();
+    String selectedFeedUrl = DomainShieldService.defaultFeeds.first.url;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xFF1E222A),
+          title: Row(
+            children: const [
+              Icon(Icons.shield_outlined, color: Colors.indigoAccent, size: 22),
+              SizedBox(width: 8),
+              Text('Domain Shield Rules & Online Feeds'),
+            ],
+          ),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.indigo.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: Colors.indigoAccent.withValues(alpha: 0.3),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Subscribe to Live Online Feed',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.indigoAccent,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        DropdownButton<String>(
+                          value: selectedFeedUrl,
+                          isExpanded: true,
+                          underline: const SizedBox(),
+                          items: DomainShieldService.defaultFeeds.map((feed) {
+                            return DropdownMenuItem<String>(
+                              value: feed.url,
+                              child: Text(
+                                '${feed.name} — ${feed.description}',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setDialogState(() => selectedFeedUrl = val);
+                            }
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                        ElevatedButton.icon(
+                          onPressed: controller.isSyncingBlocklist
+                              ? null
+                              : () async {
+                                  try {
+                                    final count = await controller
+                                        .syncOnlineBlocklist(selectedFeedUrl);
+                                    setDialogState(() {});
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'Successfully imported $count domains!',
+                                          ),
+                                          backgroundColor: Colors.green,
+                                        ),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Failed to download feed: $e',
+                                              ),
+                                              backgroundColor: Colors.red,
+                                            ),
+                                          );
+                                    }
+                                  }
+                                },
+                          icon: controller.isSyncingBlocklist
+                              ? const SizedBox(
+                                  width: 14,
+                                  height: 14,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.cloud_download_outlined,
+                                  size: 16,
+                                ),
+                          label: Text(
+                            controller.isSyncingBlocklist
+                                ? 'Downloading...'
+                                : 'Download & Sync Feed',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.indigoAccent,
+                            foregroundColor: Colors.white,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  const Text(
+                    'Block Specific Domain Manually',
+                    style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: domainCtrl,
+                          decoration: const InputDecoration(
+                            hintText: 'e.g. ads.example.com or tracker.net',
+                            contentPadding: EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton(
+                        onPressed: () {
+                          if (domainCtrl.text.trim().isNotEmpty) {
+                            controller.addBlockedDomain(domainCtrl.text);
+                            domainCtrl.clear();
+                            setDialogState(() {});
+                          }
+                        },
+                        child: const Text('Block'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStrategyChip(
+    MonitorController controller, {
+    required GatewayRoutingMode mode,
+    required String label,
+    required IconData icon,
+  }) {
+    final isSelected = controller.gatewayMode == mode;
+    return ChoiceChip(
+      avatar: Icon(
+        icon,
+        size: 14,
+        color: isSelected ? Colors.black : Colors.grey,
+      ),
+      label: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+        ),
+      ),
+      selected: isSelected,
+      selectedColor: controller.accentColor.color,
+      onSelected: (_) => controller.setGatewayMode(mode),
+    );
+  }
+
+  String _getStrategyDescription(GatewayRoutingMode mode, int minutes) {
+    return switch (mode) {
+      GatewayRoutingMode.fastest => 'Routes all requests through the verified proxy with the lowest response latency.',
+      GatewayRoutingMode.roundRobin => 'Changes IP address on every single request. Great for scraping, not for web browsing.',
+      GatewayRoutingMode.stickyDomain => 'Locks same-domain requests (e.g. *.github.com) to one IP to keep your login sessions intact.',
+      GatewayRoutingMode.stickyTime =>
+        'Locks all browsing traffic to the same proxy for $minutes minutes, then rotates to the next.',
+    };
+  }
+}
